@@ -122,8 +122,18 @@ ace-lora-trainer/
 └── lora_output/              # Training output
 ```
 
+## Documentation
+
+For a complete, in-depth guide covering every parameter, feature, and workflow:
+
+**[TRAINING_GUIDE.md](TRAINING_GUIDE.md)** — Full training guide with parameter explanations, GPU presets, disk space requirements, security notes, and troubleshooting.
+
+## License
+
+Apache License 2.0 — see [LICENSE](LICENSE).
+
 ## Credits
 
 - [ACE-Step](https://github.com/ace-step/ACE-Step) — Base music generation model
 - [Side-Step](https://github.com/koda-dernet/Side-Step) — Inspiration for advanced training features
-- Built with Claude Code
+- Built with [Claude Code](https://claude.ai)
