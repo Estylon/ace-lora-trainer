@@ -139,9 +139,14 @@ class TrainingConfig:
     # parameter stochastically sampled from {1,2,3}"
     dynamic_shift: bool = False
 
-    # CFG settings (base model only, ignored for turbo)
+    # CFG settings
     guidance_scale: float = 0.0  # 0 = disabled. Base: 5.0-15.0 recommended
-    cfg_dropout_prob: float = 0.1  # Probability of dropping condition during training
+    cfg_dropout_prob: float = 0.15  # Probability of dropping condition during training (all model types)
+
+    # Timestep sampling (logit-normal distribution matching pre-training)
+    # t = sigmoid(N(mu, sigma)) — these defaults match the model's own sample_t_r()
+    timestep_mu: float = -0.4  # Logit-normal mean (negative = bias toward cleaner data)
+    timestep_sigma: float = 1.0  # Logit-normal standard deviation
 
     learning_rate: float = 1e-4
     batch_size: int = 1
@@ -213,8 +218,13 @@ class TrainingConfig:
 
     @property
     def use_cfg(self) -> bool:
-        """Check if CFG training is enabled (base model only)."""
-        return not self.is_turbo and self.guidance_scale > 0
+        """Check if CFG dropout is enabled.
+
+        CFG dropout is now applied to ALL model types (turbo included)
+        when cfg_dropout_prob > 0. This matches the original pre-training
+        which used null_condition_emb for unconditional generation.
+        """
+        return self.cfg_dropout_prob > 0
     
     def resolve_precision(self) -> str:
         """Resolve the actual precision to use.
@@ -240,6 +250,8 @@ class TrainingConfig:
             "dynamic_shift": self.dynamic_shift,
             "guidance_scale": self.guidance_scale,
             "cfg_dropout_prob": self.cfg_dropout_prob,
+            "timestep_mu": self.timestep_mu,
+            "timestep_sigma": self.timestep_sigma,
             "learning_rate": self.learning_rate,
             "batch_size": self.batch_size,
             "gradient_accumulation_steps": self.gradient_accumulation_steps,

@@ -161,111 +161,97 @@ def create_scheduler(optimizer, training_config, total_steps: int):
     return scheduler
 
 
-# Turbo model discrete timestep schedules for different shift values.
-# Pre-computed using: t_shifted = shift * t / (1 + (shift - 1) * t)
-# applied to 8 uniform steps in [0, 1].
-# These match the distillation training described in the ACE-Step paper.
-TURBO_SHIFT3_TIMESTEPS = [1.0, 0.9545454545454546, 0.9, 0.8333333333333334, 0.75, 0.6428571428571429, 0.5, 0.3]
+def sample_logit_normal_timestep(bsz, device, dtype, mu=-0.4, sigma=1.0):
+    """Sample timesteps from logit-normal distribution matching pre-training.
 
+    This is a faithful reproduction of the model's own sample_t_r() function
+    from modeling_acestep_v15_turbo.py. The logit-normal distribution:
+        t = sigmoid(N(mu, sigma))
+    creates a bell-shaped distribution in [0,1] that matches what the model
+    saw during pre-training. This is critical for LoRA training quality.
 
-def _compute_shifted_timesteps(shift: float, num_steps: int = 8):
-    """Compute discrete timestep schedule for a given shift value.
-
-    Uses the shift transformation: t_shifted = shift * t / (1 + (shift - 1) * t)
-    applied to num_steps uniform steps from 1.0 down to near 0.
-
-    Args:
-        shift: Shift factor (1, 2, or 3 for turbo dynamic shift)
-        num_steps: Number of discrete steps
-
-    Returns:
-        List of shifted timestep values (descending from ~1.0)
-    """
-    import numpy as np
-    # Uniform steps in (0, 1], excluding 0
-    raw = np.linspace(1.0, 1.0 / (num_steps + 1), num_steps)
-    if shift == 1.0:
-        return raw.tolist()
-    shifted = shift * raw / (1.0 + (shift - 1.0) * raw)
-    return shifted.tolist()
-
-
-# Pre-compute schedules for dynamic shift {1, 2, 3} (paper: "stochastically sampled from {1,2,3}")
-TURBO_SHIFT_SCHEDULES = {
-    1: _compute_shifted_timesteps(1.0, 8),
-    2: _compute_shifted_timesteps(2.0, 8),
-    3: _compute_shifted_timesteps(3.0, 8),  # Same as TURBO_SHIFT3_TIMESTEPS
-}
-
-
-def sample_discrete_timestep(bsz, device, dtype, dynamic_shift=False):
-    """Sample timesteps from discrete turbo schedule.
-
-    When dynamic_shift=False (default), uses the standard shift=3 schedule.
-    When dynamic_shift=True, randomly selects shift from {1, 2, 3} for each
-    sample in the batch, matching the distillation strategy from the ACE-Step paper:
-    "dynamic-shift strategy with the shift parameter stochastically sampled from {1,2,3}"
-
-    Args:
-        bsz: Batch size
-        device: Device
-        dtype: Data type (bf16, fp16, or fp32)
-        dynamic_shift: If True, use paper's dynamic shift strategy
-
-    Returns:
-        Tuple of (t, r) where both are the sampled timestep
-    """
-    if not dynamic_shift:
-        # Standard fixed shift=3 schedule
-        indices = torch.randint(0, len(TURBO_SHIFT3_TIMESTEPS), (bsz,), device=device)
-        timesteps_tensor = torch.tensor(TURBO_SHIFT3_TIMESTEPS, device=device, dtype=dtype)
-        t = timesteps_tensor[indices]
-    else:
-        # Dynamic shift: for each sample, pick a random shift from {1, 2, 3}
-        # then pick a random timestep from that shift's schedule
-        t_list = []
-        for _ in range(bsz):
-            shift_val = torch.randint(1, 4, (1,)).item()  # {1, 2, 3}
-            schedule = TURBO_SHIFT_SCHEDULES[shift_val]
-            idx = torch.randint(0, len(schedule), (1,)).item()
-            t_list.append(schedule[idx])
-        t = torch.tensor(t_list, device=device, dtype=dtype)
-
-    r = t
-    return t, r
-
-
-def sample_continuous_timestep(bsz, device, dtype, shift=3.0, num_steps=60):
-    """Sample timesteps from continuous flow matching schedule for base model.
-
-    The base model uses continuous timesteps in [0, 1] with a shift transformation:
-        t_shifted = shift * t / (1 + (shift - 1) * t)
-
-    This gives more weight to higher timesteps (noisier) which helps training.
+    The old discrete 8-step schedule (used in v1) was designed for inference,
+    not training, and caused a distribution mismatch that degraded LoRA quality.
 
     Args:
         bsz: Batch size
         device: Device
         dtype: Data type
-        shift: Shift factor (1.0 = uniform, higher = more weight on noisy steps)
-        num_steps: Number of discrete steps to quantize to (for schedule alignment)
+        mu: Logit-normal mean (-0.4 = bias toward cleaner data, matching pre-training)
+        sigma: Logit-normal standard deviation (1.0 = moderate spread)
 
     Returns:
-        Tuple of (t, t_raw) where t is shifted and t_raw is the original sample
+        Tuple of (t, r) — for current ACE-Step variants, r == t
     """
-    # Sample uniform timesteps in [0, 1]
-    t_raw = torch.rand(bsz, device=device, dtype=dtype)
+    # Sample from logit-normal: t = sigmoid(N(mu, sigma))
+    t = torch.sigmoid(torch.randn((bsz,), device=device, dtype=dtype) * sigma + mu)
+    r = torch.sigmoid(torch.randn((bsz,), device=device, dtype=dtype) * sigma + mu)
 
-    # Apply shift transformation: t_shifted = shift * t / (1 + (shift - 1) * t)
-    if shift != 1.0:
-        t = shift * t_raw / (1.0 + (shift - 1.0) * t_raw)
-    else:
-        t = t_raw
+    # Ensure t >= r (t is the noisier timestep)
+    t, r = torch.maximum(t, r), torch.minimum(t, r)
 
-    # Clamp to valid range
-    t = t.clamp(min=1e-5, max=1.0 - 1e-5)
+    # For current ACE-Step variants, data_proportion = 1.0 so r = t
+    # (infrastructure for future mean-flow support is preserved above)
+    r = t
 
-    return t, t_raw
+    return t, r
+
+
+def apply_cfg_dropout(encoder_hidden_states, null_condition_emb, cfg_ratio=0.15):
+    """Apply classifier-free guidance dropout using model's learned null embedding.
+
+    Replaces randomly selected condition embeddings with the model's own
+    null_condition_emb (the learned unconditional embedding from pre-training).
+
+    The v1 approach of zeroing out embeddings was incorrect — the model was
+    pre-trained with a specific learned null embedding, not zeros. Using zeros
+    produces incorrect gradient signals during LoRA training.
+
+    Args:
+        encoder_hidden_states: [B, L, D] condition embeddings
+        null_condition_emb: The model's learned null/unconditional embedding
+        cfg_ratio: Probability of replacing each sample's condition (default 0.15)
+
+    Returns:
+        Modified encoder_hidden_states with some samples replaced by null embedding
+    """
+    if cfg_ratio <= 0:
+        return encoder_hidden_states
+
+    bsz = encoder_hidden_states.shape[0]
+    drop_mask = torch.rand(bsz, device=encoder_hidden_states.device) < cfg_ratio
+
+    if not drop_mask.any():
+        return encoder_hidden_states
+
+    # Clone to avoid in-place modification
+    encoder_hidden_states = encoder_hidden_states.clone()
+
+    # Replace dropped samples with the model's null condition embedding
+    # null_condition_emb shape may be [1, L, D] or [L, D] — broadcast to match
+    null_emb = null_condition_emb.to(
+        device=encoder_hidden_states.device,
+        dtype=encoder_hidden_states.dtype,
+    )
+    if null_emb.dim() == 2:
+        null_emb = null_emb.unsqueeze(0)
+
+    # Expand null_emb to match the sequence length of encoder_hidden_states
+    seq_len = encoder_hidden_states.shape[1]
+    null_seq_len = null_emb.shape[1]
+    if null_seq_len < seq_len:
+        # Pad null_emb with zeros to match
+        padding = torch.zeros(
+            1, seq_len - null_seq_len, null_emb.shape[2],
+            device=null_emb.device, dtype=null_emb.dtype,
+        )
+        null_emb = torch.cat([null_emb, padding], dim=1)
+    elif null_seq_len > seq_len:
+        null_emb = null_emb[:, :seq_len, :]
+
+    encoder_hidden_states[drop_mask] = null_emb.expand(drop_mask.sum(), -1, -1)
+
+    return encoder_hidden_states
 
 
 class PreprocessedLoRAModule(nn.Module):
@@ -290,7 +276,7 @@ class PreprocessedLoRAModule(nn.Module):
         dtype: torch.dtype,
     ):
         """Initialize the training module.
-        
+
         Args:
             model: The AceStepConditionGenerationModel
             lora_config: LoRA configuration
@@ -299,12 +285,12 @@ class PreprocessedLoRAModule(nn.Module):
             dtype: Data type to use
         """
         super().__init__()
-        
+
         self.lora_config = lora_config
         self.training_config = training_config
         self.device = device
         self.dtype = dtype
-        
+
         # Inject LoRA into the decoder only
         if check_peft_available():
             attention_type = getattr(training_config, 'attention_type', 'both')
@@ -314,10 +300,21 @@ class PreprocessedLoRAModule(nn.Module):
             self.model = model
             self.lora_info = {}
             logger.warning("PEFT not available, training without LoRA adapters")
-        
+
         # Model config for flow matching
         self.config = model.config
-        
+
+        # Cache the model's null_condition_emb for CFG dropout
+        # This is the learned unconditional embedding from pre-training
+        self._null_condition_emb = getattr(model, 'null_condition_emb', None)
+        if self._null_condition_emb is None:
+            # Try to find it on the decoder
+            self._null_condition_emb = getattr(model.decoder, 'null_condition_emb', None)
+        if self._null_condition_emb is not None:
+            logger.info("Found model.null_condition_emb for CFG dropout")
+        else:
+            logger.warning("model.null_condition_emb not found — CFG dropout will zero embeddings instead")
+
         # Store training losses
         self.training_losses = []
     
@@ -358,34 +355,32 @@ class PreprocessedLoRAModule(nn.Module):
             x1 = torch.randn_like(target_latents)  # Noise
             x0 = target_latents  # Data
 
-            # Sample timesteps based on model type
-            if self.training_config.is_turbo:
-                # Turbo: discrete timesteps from 8-step schedule
-                # dynamic_shift=True uses paper's {1,2,3} shift strategy
-                t, r = sample_discrete_timestep(
-                    bsz, self.device, self.dtype,
-                    dynamic_shift=self.training_config.dynamic_shift,
-                )
-            else:
-                # Base: continuous timesteps with shift transformation
-                t, r = sample_continuous_timestep(
-                    bsz, self.device, self.dtype,
-                    shift=self.training_config.shift,
-                    num_steps=self.training_config.num_inference_steps,
-                )
+            # Logit-normal timestep sampling (matches model pre-training distribution)
+            # This replaces the old discrete 8-step schedule (turbo) and uniform+shift (base)
+            t, r = sample_logit_normal_timestep(
+                bsz, self.device, self.dtype,
+                mu=self.training_config.timestep_mu,
+                sigma=self.training_config.timestep_sigma,
+            )
 
             t_ = t.unsqueeze(-1).unsqueeze(-1)
 
             # Interpolate: x_t = t * x1 + (1 - t) * x0
             xt = t_ * x1 + (1.0 - t_) * x0
 
-            # CFG dropout for base model training:
-            # Randomly drop condition with cfg_dropout_prob to train unconditional path
-            if self.training_config.use_cfg:
+            # CFG dropout: replace random samples' condition with null embedding
+            # Applied to ALL model types (turbo + base) matching pre-training
+            if self.training_config.use_cfg and self._null_condition_emb is not None:
+                encoder_hidden_states = apply_cfg_dropout(
+                    encoder_hidden_states,
+                    self._null_condition_emb,
+                    cfg_ratio=self.training_config.cfg_dropout_prob,
+                )
+            elif self.training_config.use_cfg:
+                # Fallback: zero out embeddings if null_condition_emb not available
                 drop_mask = torch.rand(bsz, device=self.device) < self.training_config.cfg_dropout_prob
                 if drop_mask.any():
-                    # Zero out encoder outputs for dropped samples (unconditional)
-                    drop_mask_expanded = drop_mask.unsqueeze(-1).unsqueeze(-1)  # [B, 1, 1]
+                    drop_mask_expanded = drop_mask.unsqueeze(-1).unsqueeze(-1)
                     encoder_hidden_states = encoder_hidden_states * (~drop_mask_expanded).float()
                     encoder_attention_mask = encoder_attention_mask * (~drop_mask.unsqueeze(-1)).float()
 
@@ -559,12 +554,9 @@ class LoRATrainer:
         self.fabric.launch()
         
         model_info = f"{'turbo' if self.training_config.is_turbo else 'base'}"
-        if self.training_config.is_turbo and self.training_config.dynamic_shift:
-            model_info += ", dynamic-shift={1,2,3}"
-        if not self.training_config.is_turbo:
-            model_info += f", shift={self.training_config.shift}, steps={self.training_config.num_inference_steps}"
-            if self.training_config.use_cfg:
-                model_info += f", CFG={self.training_config.guidance_scale}"
+        model_info += f", timestep: logit-normal(μ={self.training_config.timestep_mu}, σ={self.training_config.timestep_sigma})"
+        if self.training_config.use_cfg:
+            model_info += f", CFG dropout={self.training_config.cfg_dropout_prob:.0%}"
         yield 0, 0.0, f"🚀 Starting training ({model_info}, precision: {resolved_precision})..."
         
         # Get dataloader
@@ -776,18 +768,40 @@ class LoRATrainer:
 
                     global_step += 1
 
-                    # Log
-                    avg_loss = accumulated_loss / accumulation_step
+                    # Log — correct loss: multiply back by G to report true per-sample loss
+                    avg_loss = accumulated_loss * self.training_config.gradient_accumulation_steps / accumulation_step
                     self.fabric.log("train/loss", avg_loss, step=global_step)
                     self.fabric.log("train/lr", scheduler.get_last_lr()[0], step=global_step)
 
                     if global_step % self.training_config.log_every_n_steps == 0:
                         yield global_step, avg_loss, f"Epoch {epoch+1}/{self.training_config.max_epochs}, Step {global_step}, Loss: {avg_loss:.4f}"
 
-                    epoch_loss += accumulated_loss
+                    epoch_loss += avg_loss
                     num_batches += 1
                     accumulated_loss = 0.0
                     accumulation_step = 0
+
+            # Flush any remaining accumulated gradients at epoch boundary
+            if accumulation_step > 0:
+                self.fabric.clip_gradients(
+                    self.module.model.decoder,
+                    optimizer,
+                    max_norm=self.training_config.max_grad_norm,
+                )
+                optimizer.step()
+                scheduler.step()
+                optimizer.zero_grad(set_to_none=True)
+                global_step += 1
+
+                avg_loss = accumulated_loss * self.training_config.gradient_accumulation_steps / accumulation_step
+                epoch_loss += avg_loss
+                num_batches += 1
+                accumulated_loss = 0.0
+                accumulation_step = 0
+
+            # Clear VRAM cache at end of each epoch to reduce fragmentation
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
             # End of epoch
             epoch_time = time.time() - epoch_start_time
@@ -1038,14 +1052,40 @@ class LoRATrainer:
                     optimizer.zero_grad(set_to_none=True)
                     global_step += 1
 
+                    # Correct loss: multiply back by G to report true per-sample loss
+                    avg_loss = accumulated_loss * self.training_config.gradient_accumulation_steps / accumulation_step
+
                     if global_step % self.training_config.log_every_n_steps == 0:
-                        avg_loss = accumulated_loss / accumulation_step
                         yield global_step, avg_loss, f"Epoch {epoch+1}, Step {global_step}, Loss: {avg_loss:.4f}"
 
-                    epoch_loss += accumulated_loss
+                    epoch_loss += avg_loss
                     num_batches += 1
                     accumulated_loss = 0.0
                     accumulation_step = 0
+
+            # Flush remaining accumulated gradients at epoch boundary
+            if accumulation_step > 0:
+                if scaler is not None:
+                    scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(trainable_params, self.training_config.max_grad_norm)
+                if scaler is not None:
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    optimizer.step()
+                scheduler.step()
+                optimizer.zero_grad(set_to_none=True)
+                global_step += 1
+
+                avg_loss = accumulated_loss * self.training_config.gradient_accumulation_steps / accumulation_step
+                epoch_loss += avg_loss
+                num_batches += 1
+                accumulated_loss = 0.0
+                accumulation_step = 0
+
+            # Clear VRAM cache at end of each epoch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
             epoch_time = time.time() - epoch_start_time
             avg_epoch_loss = epoch_loss / max(num_batches, 1)

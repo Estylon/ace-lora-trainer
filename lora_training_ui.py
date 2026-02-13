@@ -165,7 +165,7 @@ def initialize_service(checkpoint_name: str, progress=gr.Progress()):
     global dit_handler, llm_handler, workflow_state, current_model_type
 
     if not checkpoint_name:
-        return "❌ Please select a checkpoint", get_status_html(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update()
+        return "❌ Please select a checkpoint", get_status_html(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update()
 
     progress(0.1, desc="Loading ACE-Step modules...")
 
@@ -193,7 +193,7 @@ def initialize_service(checkpoint_name: str, progress=gr.Progress()):
         )
 
         if not success:
-            return f"❌ Failed to initialize DiT: {status}", get_status_html(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update()
+            return f"❌ Failed to initialize DiT: {status}", get_status_html(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update()
 
         progress(0.7, desc="Initializing LLM handler...")
         checkpoint_dir = str(get_checkpoints_dir())
@@ -240,7 +240,6 @@ def initialize_service(checkpoint_name: str, progress=gr.Progress()):
                 gr.update(value=1.0),         # shift → 1.0 for base
                 gr.update(value="base"),       # model_type_radio
                 gr.update(value=7.0),          # guidance_scale
-                gr.update(value=0.1),          # cfg_dropout_prob
                 gr.update(value=60, minimum=20),  # num_inference_steps
                 gr.update(visible=True),       # base_params_group visibility
             )
@@ -251,14 +250,13 @@ def initialize_service(checkpoint_name: str, progress=gr.Progress()):
                 gr.update(value=3.0),          # shift → 3.0 for turbo
                 gr.update(value="turbo"),       # model_type_radio
                 gr.update(value=0.0),          # guidance_scale
-                gr.update(value=0.1),          # cfg_dropout_prob
                 gr.update(value=8, minimum=1),  # num_inference_steps
                 gr.update(visible=False),      # base_params_group visibility
             )
 
     except Exception as e:
         logger.exception("Failed to initialize service")
-        return f"❌ Error: {str(e)}", get_status_html(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update()
+        return f"❌ Error: {str(e)}", get_status_html(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update()
 
 
 def unload_service() -> Tuple[str, str]:
@@ -948,6 +946,7 @@ def start_training(
     model_type_val, guidance_scale_val, cfg_dropout_val, num_inference_steps_val,
     optimizer_type_val, scheduler_type_val, attention_type_val,
     gradient_checkpointing_flag, encoder_offloading_flag,
+    timestep_mu_val, timestep_sigma_val,
     resume_enabled, resume_dir, resume_checkpoint,
     training_state,
     progress=gr.Progress(),
@@ -1016,8 +1015,11 @@ def start_training(
             torch_compile=bool(torch_compile_flag),
             # Base model specific params
             guidance_scale=float(guidance_scale_val) if is_base else 0.0,
-            cfg_dropout_prob=float(cfg_dropout_val) if is_base else 0.1,
+            cfg_dropout_prob=float(cfg_dropout_val),  # Now applied to ALL model types
             num_inference_steps=int(num_inference_steps_val) if is_base else 8,
+            # Timestep sampling (logit-normal, matching pre-training)
+            timestep_mu=float(timestep_mu_val),
+            timestep_sigma=float(timestep_sigma_val),
             # New features
             optimizer_type=str(optimizer_type_val) if optimizer_type_val else "adamw",
             scheduler_type=str(scheduler_type_val) if scheduler_type_val else "cosine",
@@ -1908,13 +1910,21 @@ def create_ui():
                         shift = gr.Slider(1.0, 5.0, 3.0, step=0.5, label="Shift", info="3.0=Turbo, 1.0=Base")
                         seed = gr.Number(label="Seed", value=42, precision=0)
 
+                    # Advanced training parameters (timestep sampling + CFG dropout)
+                    with gr.Accordion("⚙️ Advanced: Timestep & CFG", open=False):
+                        gr.HTML('<div style="padding:6px 10px;background:rgba(59,130,246,0.08);border:1px solid rgba(59,130,246,0.2);border-radius:8px;margin-bottom:8px"><span style="font-size:12px;color:#2563eb">📐 <b>Logit-Normal Timestep Sampling</b> — matches model pre-training distribution. Default values recommended.</span></div>')
+                        with gr.Row(elem_classes="compact-row"):
+                            timestep_mu = gr.Slider(-2.0, 1.0, -0.4, step=0.1, label="Timestep μ (mu)", info="Logit-normal mean. -0.4 = bias toward cleaner data (default, matches pre-training)")
+                            timestep_sigma = gr.Slider(0.1, 3.0, 1.0, step=0.1, label="Timestep σ (sigma)", info="Logit-normal spread. 1.0 = moderate spread (default)")
+                        with gr.Row(elem_classes="compact-row"):
+                            cfg_dropout_prob = gr.Slider(0.0, 0.5, 0.15, step=0.05, label="CFG Dropout", info="Probability of dropping condition (uses model's null embedding). 0.15 = 15% (default). Applied to ALL model types.")
+
                     # Base model parameters — hidden by default, shown when base model detected
                     base_params_group = gr.Group(visible=False)
                     with base_params_group:
-                        gr.HTML('<div style="padding:6px 10px;background:rgba(249,115,22,0.08);border:1px solid rgba(249,115,22,0.2);border-radius:8px;margin-bottom:8px"><span style="font-size:12px;color:#ea580c">🎯 <b>Base Model Parameters</b> — Classifier-Free Guidance for continuous timestep training</span></div>')
+                        gr.HTML('<div style="padding:6px 10px;background:rgba(249,115,22,0.08);border:1px solid rgba(249,115,22,0.2);border-radius:8px;margin-bottom:8px"><span style="font-size:12px;color:#ea580c">🎯 <b>Base Model Parameters</b> — Additional settings for base model training</span></div>')
                         with gr.Row(elem_classes="compact-row"):
-                            guidance_scale = gr.Slider(0.0, 15.0, 7.0, step=0.5, label="CFG Scale", info="Guidance strength. 5-10 recommended. 0=disabled")
-                            cfg_dropout_prob = gr.Slider(0.0, 0.3, 0.1, step=0.05, label="CFG Dropout", info="Probability of dropping condition during training")
+                            guidance_scale = gr.Slider(0.0, 15.0, 7.0, step=0.5, label="CFG Scale", info="Guidance strength for inference. 5-10 recommended. 0=disabled")
                             num_inference_steps = gr.Slider(20, 100, 60, step=10, label="Inference Steps", info="More steps = better quality, slower training")
 
                     save_every_n_epochs = gr.Number(label="Save Every N Epochs", value=50, precision=0, info="More checkpoints to avoid overfitting")
@@ -2085,7 +2095,7 @@ def create_ui():
 
         # Service
         refresh_btn.click(fn=lambda: gr.Dropdown(choices=list_available_checkpoints()), outputs=[checkpoint_dropdown])
-        init_btn.click(fn=initialize_service, inputs=[checkpoint_dropdown], outputs=[service_status, status_bar, shift, model_type_radio, guidance_scale, cfg_dropout_prob, num_inference_steps, base_params_group])
+        init_btn.click(fn=initialize_service, inputs=[checkpoint_dropdown], outputs=[service_status, status_bar, shift, model_type_radio, guidance_scale, num_inference_steps, base_params_group])
         unload_btn.click(fn=unload_service, outputs=[service_status, status_bar])
 
         # Dataset
@@ -2164,7 +2174,7 @@ def create_ui():
 
         start_training_btn.click(
             fn=start_training,
-            inputs=[training_tensor_dir, lora_rank, lora_alpha, lora_dropout, learning_rate, max_epochs, batch_size, gradient_accumulation, save_every_n_epochs, shift, seed, lora_output_dir, early_stop_enabled, early_stop_patience_val, auto_save_best_after, max_latent_length, torch_compile_enabled, model_type_radio, guidance_scale, cfg_dropout_prob, num_inference_steps, optimizer_type, scheduler_type, attention_type, gradient_checkpointing_enabled, encoder_offloading_enabled, resume_enabled, resume_dir, resume_checkpoint_dropdown, training_state],
+            inputs=[training_tensor_dir, lora_rank, lora_alpha, lora_dropout, learning_rate, max_epochs, batch_size, gradient_accumulation, save_every_n_epochs, shift, seed, lora_output_dir, early_stop_enabled, early_stop_patience_val, auto_save_best_after, max_latent_length, torch_compile_enabled, model_type_radio, guidance_scale, cfg_dropout_prob, num_inference_steps, optimizer_type, scheduler_type, attention_type, gradient_checkpointing_enabled, encoder_offloading_enabled, timestep_mu, timestep_sigma, resume_enabled, resume_dir, resume_checkpoint_dropdown, training_state],
             outputs=[training_progress, training_log, training_loss_plot, training_state, status_bar],
         )
         stop_training_btn.click(fn=stop_training, inputs=[training_state], outputs=[training_progress, training_state])
