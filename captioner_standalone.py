@@ -729,8 +729,14 @@ def load_model_ui(model_path, progress=None):
         return "❌ Please specify model path"
 
     model_path = model_path.strip()
-    if not os.path.exists(model_path):
-        return f"❌ Model path not found: {model_path}"
+    # Accept both local paths and HuggingFace model IDs (e.g. "ACE-Step/acestep-captioner")
+    # HF IDs look like "org/model" — no backslashes, no absolute path indicators
+    is_hf_id = "/" in model_path and "\\" not in model_path and not os.path.isabs(model_path)
+    if not is_hf_id and not os.path.exists(model_path):
+        return f"❌ Model path not found: {model_path}\nTo auto-download from HuggingFace, use format: ACE-Step/acestep-captioner"
+
+    if is_hf_id and progress:
+        progress(0.1, desc=f"Downloading {model_path} from HuggingFace (this may take a while on first use)...")
 
     def progress_cb(step, message):
         if progress:
@@ -1373,8 +1379,10 @@ Examples:
         print(f"❌ Input directory not found: {args.input_dir}")
         sys.exit(1)
 
-    if not os.path.exists(args.model_path):
+    is_hf_id = "/" in args.model_path and "\\" not in args.model_path and not os.path.isabs(args.model_path)
+    if not is_hf_id and not os.path.exists(args.model_path):
         print(f"❌ Model path not found: {args.model_path}")
+        print("To auto-download from HuggingFace, use format: ACE-Step/acestep-captioner")
         sys.exit(1)
 
     if not args.output_dir and not args.output_csv:
