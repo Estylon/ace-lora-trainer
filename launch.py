@@ -14,6 +14,78 @@ import sys
 import os
 
 
+def check_environment():
+    """Check that we're running in a proper environment with all dependencies."""
+    # Check if we're in a virtual environment
+    in_venv = (hasattr(sys, 'real_prefix') or
+               (hasattr(sys, 'base_prefix') and sys.base_prefix != sys.prefix))
+
+    if not in_venv:
+        print("\n" + "=" * 60)
+        print("  ⚠️  WARNING: Not running inside a virtual environment!")
+        print("=" * 60)
+        print()
+        if sys.platform == 'win32':
+            print("  Please run install.bat first, then use start.bat")
+            print("  Or manually:")
+            print("    env\\Scripts\\activate && python launch.py")
+        else:
+            print("  Please run install.sh first, then use start.sh")
+            print("  Or manually:")
+            print("    source env/bin/activate && python launch.py")
+        print()
+        print("  Without a virtual environment, critical packages like")
+        print("  PEFT may be missing, causing training to run WITHOUT")
+        print("  LoRA (full fine-tuning instead — much slower and larger).")
+        print("=" * 60)
+        print()
+        response = input("  Continue anyway? (y/N): ").strip().lower()
+        if response != 'y':
+            sys.exit(0)
+        print()
+
+    # Check critical packages
+    missing = []
+
+    try:
+        import torch
+    except ImportError:
+        missing.append("torch (PyTorch)")
+
+    try:
+        import peft
+    except ImportError:
+        missing.append("peft (CRITICAL — without this, LoRA training is disabled!)")
+
+    try:
+        import lightning
+    except ImportError:
+        missing.append("lightning")
+
+    try:
+        import gradio
+    except ImportError:
+        missing.append("gradio")
+
+    if missing:
+        print("\n" + "=" * 60)
+        print("  ❌  MISSING PACKAGES DETECTED")
+        print("=" * 60)
+        for pkg in missing:
+            print(f"  • {pkg}")
+        print()
+        if sys.platform == 'win32':
+            print("  Run install.bat to install all dependencies.")
+        else:
+            print("  Run install.sh to install all dependencies.")
+        print("=" * 60)
+        print()
+        response = input("  Continue anyway? (y/N): ").strip().lower()
+        if response != 'y':
+            sys.exit(0)
+        print()
+
+
 def launch_training_ui(host="127.0.0.1", port=7861, share=False):
     """Launch the LoRA Training UI."""
     from lora_training_ui import create_ui
@@ -101,4 +173,5 @@ Examples:
 
 
 if __name__ == "__main__":
+    check_environment()
     main()

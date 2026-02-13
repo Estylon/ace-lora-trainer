@@ -32,18 +32,38 @@ A standalone Gradio UI for training LoRA adapters on [ACE-Step 1.5](https://gith
 # Clone this repo
 git clone https://github.com/Estylon/ace-lora-trainer.git
 cd ace-lora-trainer
+```
 
+**Windows:**
+```
+install.bat
+```
+
+**Linux/Mac:**
+```bash
+chmod +x install.sh start.sh
+./install.sh
+```
+
+<details>
+<summary>Manual installation</summary>
+
+```bash
 # Create virtual environment
 python -m venv env
-# Windows:
+
+# Activate — Windows:
 env\Scripts\activate
-# Linux/Mac:
+# Activate — Linux/Mac:
 source env/bin/activate
 
 # Install dependencies
 uv pip install -r requirements.txt
 # Or: pip install -r requirements.txt
 ```
+</details>
+
+> **⚠️ Important:** Always use the virtual environment! Without it, critical packages like PEFT will be missing and training will silently fall back to full fine-tuning (much slower and ~35x larger checkpoints).
 
 ### 2. Models
 
@@ -55,7 +75,24 @@ uv pip install -r requirements.txt
 
 ### 3. Launch
 
+**Windows:**
+```
+start.bat
+```
+
+**Linux/Mac:**
 ```bash
+./start.sh
+```
+
+<details>
+<summary>Manual launch / options</summary>
+
+```bash
+# Activate venv first!
+# Windows: env\Scripts\activate
+# Linux/Mac: source env/bin/activate
+
 # Training UI (default)
 python launch.py
 
@@ -65,6 +102,7 @@ python launch.py --mode caption
 # Both UIs simultaneously
 python launch.py --mode both
 ```
+</details>
 
 ## Recommended Settings by GPU
 
@@ -102,7 +140,9 @@ With Early Stop enabled, training will automatically stop when loss plateaus.
 
 ```
 ace-lora-trainer/
-├── launch.py                 # Main launcher
+├── install.bat / install.sh  # One-click installer (creates venv + deps)
+├── start.bat / start.sh      # One-click launcher (activates venv + runs)
+├── launch.py                 # Main launcher (with environment checks)
 ├── lora_training_ui.py       # Training Gradio UI
 ├── captioner_standalone.py   # Captioner Gradio UI
 ├── requirements.txt          # Python dependencies
