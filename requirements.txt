@@ -24,7 +24,10 @@ transformers>=4.51.0,<4.58.0
 diffusers
 accelerate>=1.12.0
 einops>=0.8.1
-torchao
+# torchao — Only needed for INT8/FP8 quantization (Linux only, requires torch.compile)
+# Not needed for LoRA training. Install manually on Linux if you want quantization:
+# pip install torchao
+torchao; sys_platform != 'win32' and sys_platform != 'darwin'
 
 # --- Training ---
 peft>=0.7.0
