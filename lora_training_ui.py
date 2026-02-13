@@ -22,10 +22,8 @@ from typing import Optional, Dict, Any, Tuple, List
 import gradio as gr
 from loguru import logger
 
-# Add ACE-Step to path
-ACESTEP_PATH = Path(__file__).parent / "ACE-Step-1.5"
-if ACESTEP_PATH.exists():
-    sys.path.insert(0, str(ACESTEP_PATH))
+# Standalone repo: acestep modules are at the same level as this file
+ACESTEP_PATH = Path(__file__).parent
 
 # Global handlers (initialized on demand)
 dit_handler = None
@@ -45,13 +43,6 @@ workflow_state = {
 def get_checkpoints_dir() -> Path:
     """Get the checkpoints directory."""
     return ACESTEP_PATH / "checkpoints"
-
-
-def get_default_output_dir() -> str:
-    """Get smart default output directory."""
-    base = ACESTEP_PATH / "lora_projects"
-    base.mkdir(exist_ok=True)
-    return str(base)
 
 
 def list_available_checkpoints() -> List[str]:
@@ -1009,8 +1000,8 @@ GPU_PRESETS = {
         "max_epochs": 1000,
         "batch_size": 1,
         "gradient_accumulation": 4,
-        "optimizer_type": "adamw8bit",
-        "scheduler_type": "cosine",
+        "optimizer_type": "adafactor",
+        "scheduler_type": "constant_with_warmup",
         "attention_type": "self",
         "gradient_checkpointing": True,
         "encoder_offloading": True,
@@ -1890,7 +1881,7 @@ def create_ui():
 
                     gr.HTML("""
                     <div class="quick-tip">
-                        <strong>💡 Tip:</strong> Save inside <code>ACE-Step-1.5/checkpoints/</code> with a name starting
+                        <strong>💡 Tip:</strong> Save inside <code>checkpoints/</code> with a name starting
                         with <code>acestep-v15-</code> and it will appear in the model dropdown for inference.
                     </div>
                     """)

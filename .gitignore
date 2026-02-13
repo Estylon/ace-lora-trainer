@@ -29,8 +29,13 @@ checkpoints/
 
 # Training outputs
 lora_output/
+lora_projects/
 datasets/preprocessed_tensors/
+datasets/*.json
 logs/
+
+# Cache
+.cache/
 
 # OS
 .DS_Store
