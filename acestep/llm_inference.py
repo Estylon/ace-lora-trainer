@@ -517,17 +517,8 @@ class LLMHandler:
             codes_temperature=codes_temperature,
         )
 
-        # Calculate max_tokens based on target_duration if specified
-        # 5 audio codes = 1 second, plus ~500 tokens for CoT metadata and safety margin
-        if target_duration is not None and target_duration > 0:
-            # Ensure duration is within valid range (10-600 seconds)
-            effective_duration = max(10, min(600, target_duration))
-            max_tokens = int(effective_duration * 5) + 500
-            # Cap at model's max length
-            max_tokens = min(max_tokens, self.max_model_len - 64)
-        else:
-            # No duration constraint - use default (model will stop at EOS naturally)
-            max_tokens = self.max_model_len - 64
+        # Calculate max_tokens based on target_duration and generation phase
+        max_tokens = self._compute_max_new_tokens(target_duration, generation_phase)
 
         sampling_params = SamplingParams(
             max_tokens=max_tokens,
@@ -622,18 +613,9 @@ class LLMHandler:
         with self._load_model_context():
             inputs = {k: v.to(self.device) for k, v in inputs.items()}
             
-            # Calculate max_new_tokens based on target_duration if specified
-            # 5 audio codes = 1 second, plus ~500 tokens for CoT metadata and safety margin
-            if target_duration is not None and target_duration > 0:
-                # Ensure duration is within valid range (10-600 seconds)
-                effective_duration = max(10, min(600, target_duration))
-                max_new_tokens = int(effective_duration * 5) + 500
-            else:
-                max_new_tokens = getattr(self.llm.config, "max_new_tokens", 4096)
-            
-            # Cap at model's max length
-            if hasattr(self, "max_model_len"):
-                max_new_tokens = min(max_new_tokens, self.max_model_len - 64)
+            # Calculate max_new_tokens based on target_duration and generation phase
+            fallback = getattr(self.llm.config, "max_new_tokens", 4096) if self.llm else 4096
+            max_new_tokens = self._compute_max_new_tokens(target_duration, generation_phase, fallback_max=fallback)
 
             # Build logits processor list (only for CFG and repetition penalty)
             logits_processor = self._build_logits_processor(repetition_penalty)
@@ -773,41 +755,42 @@ class LLMHandler:
         # Determine if batch mode
         formatted_prompt_list, is_batch = self._normalize_batch_input(formatted_prompts)
 
-        # For batch mode, process each item sequentially with different seeds
+        # For batch mode, process each item sequentially with different seeds.
+        # Wrap the entire loop in _load_model_context() so the LLM loads to GPU
+        # once and offloads once (instead of per-item).
         if is_batch:
             output_texts = []
-            for i, formatted_prompt in enumerate(formatted_prompt_list):
-                # Set seed for this item if provided
-                if seeds and i < len(seeds):
-                    torch.manual_seed(seeds[i])
-                    if torch.cuda.is_available():
-                        torch.cuda.manual_seed_all(seeds[i])
-                
-                # Generate using single-item method with batch-mode defaults
-                output_text = self._run_pt_single(
-                    formatted_prompt=formatted_prompt,
-                    temperature=temperature,
-                    cfg_scale=cfg_scale,
-                    negative_prompt=negative_prompt,
-                    top_k=top_k,
-                    top_p=top_p,
-                    repetition_penalty=repetition_penalty,
-                    use_constrained_decoding=use_constrained_decoding,
-                    constrained_decoding_debug=constrained_decoding_debug,
-                    target_duration=target_duration,
-                    user_metadata=None,
-                    stop_at_reasoning=False,
-                    skip_genres=True,
-                    skip_caption=True,
-                    skip_language=True,
-                    generation_phase=generation_phase,
-                    caption=caption,
-                    lyrics=lyrics,
-                    cot_text=cot_text,
-                )
-                
-                output_texts.append(output_text)
-            
+            with self._load_model_context():
+                for i, formatted_prompt in enumerate(formatted_prompt_list):
+                    if seeds and i < len(seeds):
+                        torch.manual_seed(seeds[i])
+                        if torch.cuda.is_available():
+                            torch.cuda.manual_seed_all(seeds[i])
+
+                    output_text = self._run_pt_single(
+                        formatted_prompt=formatted_prompt,
+                        temperature=temperature,
+                        cfg_scale=cfg_scale,
+                        negative_prompt=negative_prompt,
+                        top_k=top_k,
+                        top_p=top_p,
+                        repetition_penalty=repetition_penalty,
+                        use_constrained_decoding=use_constrained_decoding,
+                        constrained_decoding_debug=constrained_decoding_debug,
+                        target_duration=target_duration,
+                        user_metadata=None,
+                        stop_at_reasoning=False,
+                        skip_genres=True,
+                        skip_caption=True,
+                        skip_language=True,
+                        generation_phase=generation_phase,
+                        caption=caption,
+                        lyrics=lyrics,
+                        cot_text=cot_text,
+                    )
+
+                    output_texts.append(output_text)
+
             return output_texts
 
         # Single mode: process the formatted prompt
@@ -2358,21 +2341,37 @@ class LLMHandler:
         """
         Context manager to load a model to GPU and offload it back to CPU after use.
         Only used for PyTorch backend when offload_to_cpu is True.
+
+        Reentrant: if the model is already on the target device (e.g. from an
+        outer context), this is a no-op — the model stays on GPU and the outer
+        context handles offloading.
         """
         if not self.offload_to_cpu:
             yield
             return
-        
-        # If using nanovllm, do not offload (it stays on GPU)
+
         if self.llm_backend == "vllm":
             yield
             return
-        
+
         model = self.llm
         if model is None:
             yield
             return
-        
+
+        # Reentrancy guard: skip if model is already on the target device
+        already_on_device = False
+        try:
+            first_param = next(model.parameters(), None)
+            if first_param is not None and first_param.device.type == self.device.type if hasattr(self.device, 'type') else str(first_param.device).startswith(str(self.device)):
+                already_on_device = True
+        except Exception:
+            pass
+
+        if already_on_device:
+            yield
+            return
+
         # Load to GPU
         logger.info(f"Loading LLM to {self.device}")
         start_time = time.time()
@@ -2384,7 +2383,6 @@ class LLMHandler:
         try:
             yield
         finally:
-            # Offload to CPU
             logger.info(f"Offloading LLM to CPU")
             start_time = time.time()
             if hasattr(model, "to"):
@@ -2392,7 +2390,45 @@ class LLMHandler:
             torch.cuda.empty_cache()
             offload_time = time.time() - start_time
             logger.info(f"Offloaded LLM to CPU in {offload_time:.4f}s")
-    
+
+    def _compute_max_new_tokens(
+        self,
+        target_duration: Optional[float],
+        generation_phase: str = "cot",
+        fallback_max: Optional[int] = None,
+    ) -> int:
+        """Compute max_new_tokens based on target duration and generation phase.
+
+        In the codes phase the constrained decoder forces EOS at exactly
+        target_codes tokens, so only a tiny buffer (+10) is needed.
+        """
+        from acestep.constants import DURATION_MIN, DURATION_MAX
+
+        if target_duration is not None and target_duration > 0:
+            gpu_config = None
+            try:
+                from acestep.gpu_config import get_global_gpu_config
+                gpu_config = get_global_gpu_config()
+            except Exception:
+                pass
+
+            max_dur = DURATION_MAX
+            if gpu_config and hasattr(gpu_config, 'max_duration'):
+                max_dur = min(max_dur, gpu_config.max_duration)
+
+            effective_duration = max(DURATION_MIN, min(max_dur, target_duration))
+            target_codes = int(effective_duration * 5)
+
+            if generation_phase == "codes":
+                max_new_tokens = target_codes + 10
+            else:
+                max_new_tokens = target_codes + 500
+        else:
+            max_new_tokens = fallback_max or (self.max_model_len - 64)
+
+        max_new_tokens = min(max_new_tokens, self.max_model_len - 64)
+        return max_new_tokens
+
     def get_hf_model_for_scoring(self):
         """
         Get HuggingFace model for perplexity scoring.

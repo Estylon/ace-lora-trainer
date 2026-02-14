@@ -41,23 +41,60 @@ workflow_state = {
 
 
 def get_checkpoints_dir() -> Path:
-    """Get the checkpoints directory."""
+    """Get the primary checkpoints directory.
+
+    In the Pinokio layout the base-model symlink lives under
+    ``ACE-Step-1.5/checkpoints/`` whereas LoRA outputs go to
+    ``checkpoints/``.  We prefer the ACE-Step-1.5 path when it
+    exists because that is where the install script symlinks the
+    shared base-model checkpoints.
+    """
+    ace_step_ckpt = ACESTEP_PATH / "ACE-Step-1.5" / "checkpoints"
+    if ace_step_ckpt.exists():
+        return ace_step_ckpt
     return ACESTEP_PATH / "checkpoints"
 
 
-def list_available_checkpoints() -> List[str]:
-    """List available model checkpoints that start with 'acestep-v15-'."""
-    checkpoints_dir = get_checkpoints_dir()
-    if not checkpoints_dir.exists():
-        return []
+def _get_all_checkpoint_dirs() -> List[Path]:
+    """Return all directories that may contain base-model checkpoints."""
+    dirs = []
+    for sub in ["ACE-Step-1.5/checkpoints", "checkpoints"]:
+        p = ACESTEP_PATH / sub
+        if p.exists():
+            dirs.append(p)
+    return dirs
 
+
+def list_available_checkpoints() -> List[str]:
+    """List available model checkpoints that start with 'acestep-v15-'.
+
+    Scans all known checkpoint directories and deduplicates by name.
+    """
+    seen = set()
     checkpoints = []
-    for item in checkpoints_dir.iterdir():
-        if item.is_dir() and item.name.startswith("acestep-v15-"):
-            if (item / "config.json").exists():
-                checkpoints.append(item.name)
+    for ckpt_dir in _get_all_checkpoint_dirs():
+        try:
+            for item in ckpt_dir.iterdir():
+                if item.is_dir() and item.name.startswith("acestep-v15-"):
+                    if (item / "config.json").exists() and item.name not in seen:
+                        seen.add(item.name)
+                        checkpoints.append(item.name)
+        except OSError:
+            continue
 
     return sorted(checkpoints)
+
+
+def resolve_checkpoint_path(checkpoint_name: str) -> Path:
+    """Resolve a checkpoint name to its full path.
+
+    Searches all known checkpoint directories for the given name.
+    """
+    for ckpt_dir in _get_all_checkpoint_dirs():
+        candidate = ckpt_dir / checkpoint_name
+        if candidate.exists():
+            return candidate
+    return get_checkpoints_dir() / checkpoint_name
 
 
 # ============== Status Helper ==============
@@ -1437,7 +1474,7 @@ def merge_lora_to_safetensors(
         return "❌ Please specify an output directory"
 
     # Resolve paths
-    base_model_path = str(get_checkpoints_dir() / checkpoint_name)
+    base_model_path = str(resolve_checkpoint_path(checkpoint_name))
     if not os.path.exists(base_model_path):
         return f"❌ Base model not found: {base_model_path}"
 

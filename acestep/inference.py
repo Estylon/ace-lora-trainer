@@ -162,7 +162,7 @@ class GenerationConfig:
             - int: Single seed value (will be converted to list and padded)
         lm_batch_chunk_size: Batch chunk size for LM processing
         constrained_decoding_debug: Whether to enable constrained decoding debug
-        audio_format: Output audio format, one of "mp3", "wav", "flac". Default: "flac"
+        audio_format: Output audio format, one of "mp3", "wav", "flac", "opus", "aac". Default: "flac"
     """
     batch_size: int = 2
     allow_lm_batch: bool = False

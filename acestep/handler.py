@@ -87,7 +87,7 @@ class AceStepHandler:
         self.lora_loaded = False
         self.use_lora = False
         self.lora_scale = 1.0  # LoRA influence scale (0-1)
-        self._base_decoder = None  # Backup of original decoder
+        self._base_decoder = None  # CPU state_dict backup (memory-efficient vs deepcopy)
         self._lora_path = None  # Path of currently loaded LoRA
     
     def get_available_checkpoints(self) -> str:
@@ -133,11 +133,34 @@ class AceStepHandler:
             return False
         return getattr(self.config, 'is_turbo', False)
     
+    def _resolve_lokr_weights_path(self, adapter_path: str) -> Optional[str]:
+        """Check if adapter_path contains LoKr weights and return the weights file path.
+
+        Returns:
+            Path to lokr_weights.safetensors if found, None otherwise.
+        """
+        if os.path.isfile(adapter_path) and adapter_path.endswith(".safetensors"):
+            return adapter_path
+        if os.path.isdir(adapter_path):
+            candidate = os.path.join(adapter_path, "lokr_weights.safetensors")
+            if os.path.exists(candidate):
+                return candidate
+            candidate = os.path.join(adapter_path, "adapter", "lokr_weights.safetensors")
+            if os.path.exists(candidate):
+                return candidate
+        return None
+
     def load_lora(self, lora_path: str) -> str:
-        """Load LoRA adapter into the decoder.
+        """Load LoRA or LoKr adapter into the decoder.
+
+        Automatically detects adapter type:
+        - LoKr: if lokr_weights.safetensors is found (uses LyCORIS)
+        - LoRA: if adapter_config.json is found (uses PEFT)
+
+        Uses state_dict backup on CPU instead of deepcopy to save ~10-15GB VRAM.
 
         Args:
-            lora_path: Path to the LoRA adapter directory (containing adapter_config.json)
+            lora_path: Path to the adapter directory
 
         Returns:
             Status message
@@ -146,86 +169,181 @@ class AceStepHandler:
             return "❌ Model not initialized. Please initialize service first."
 
         if not lora_path or not lora_path.strip():
-            return "❌ Please provide a LoRA path."
+            return "❌ Please provide an adapter path."
 
         lora_path = lora_path.strip()
         self._lora_path = lora_path
-        
-        # Check if path exists
+
         if not os.path.exists(lora_path):
-            return f"❌ LoRA path not found: {lora_path}"
-        
-        # Check if it's a valid PEFT adapter directory
-        config_file = os.path.join(lora_path, "adapter_config.json")
-        if not os.path.exists(config_file):
-            return f"❌ Invalid LoRA adapter: adapter_config.json not found in {lora_path}"
-        
+            return f"❌ Adapter path not found: {lora_path}"
+
+        lokr_weights_path = self._resolve_lokr_weights_path(lora_path)
+        is_lokr = lokr_weights_path is not None
+
+        if not is_lokr:
+            config_file = os.path.join(lora_path, "adapter_config.json")
+            if not os.path.exists(config_file):
+                return f"❌ Invalid adapter: no adapter_config.json or lokr_weights.safetensors found in {lora_path}"
+
         try:
-            from peft import PeftModel, PeftConfig
-        except ImportError:
-            return "❌ PEFT library not installed. Please install with: pip install peft"
-        
-        try:
-            import copy
-            # Backup base decoder if not already backed up
+            if torch.cuda.is_available():
+                vram_before = torch.cuda.memory_allocated() / 1024**3
+                logger.info(f"VRAM before adapter load: {vram_before:.2f} GB")
+
+            # Backup base decoder state_dict on CPU (memory-efficient)
             if self._base_decoder is None:
-                self._base_decoder = copy.deepcopy(self.model.decoder)
-                logger.info("Base decoder backed up")
+                self._base_decoder = {k: v.cpu().clone() for k, v in self.model.decoder.state_dict().items()}
+                logger.info("Base decoder state_dict backed up to CPU")
             else:
-                # Restore base decoder before loading new LoRA
-                self.model.decoder = copy.deepcopy(self._base_decoder)
-                logger.info("Restored base decoder before loading new LoRA")
-            
-            # Load PEFT adapter
-            logger.info(f"Loading LoRA adapter from {lora_path}")
-            self.model.decoder = PeftModel.from_pretrained(
-                self.model.decoder,
-                lora_path,
-                is_trainable=False,
-            )
-            self.model.decoder = self.model.decoder.to(self.device).to(self.dtype)
-            self.model.decoder.eval()
-            
+                try:
+                    from peft import PeftModel
+                    if isinstance(self.model.decoder, PeftModel):
+                        self.model.decoder = self.model.decoder.get_base_model()
+                except ImportError:
+                    pass
+                lycoris_net = getattr(self.model.decoder, '_lycoris_net', None)
+                if lycoris_net is not None:
+                    try:
+                        lycoris_net.restore()
+                    except Exception:
+                        pass
+                    self.model.decoder._lycoris_net = None
+                self.model.decoder.load_state_dict(self._base_decoder, strict=False)
+                self.model.decoder = self.model.decoder.to(self.device).to(self.dtype)
+                logger.info("Restored base decoder from CPU state_dict")
+
+            if is_lokr:
+                try:
+                    from lycoris import create_lycoris, LycorisNetwork
+                except ImportError:
+                    return "❌ LyCORIS library not installed. Install with: pip install lycoris-lora"
+
+                try:
+                    from acestep.training.configs import LoKRConfig
+                except ImportError:
+                    LoKRConfig = None
+
+                lokr_config = None
+                config_path = os.path.join(os.path.dirname(lokr_weights_path), "lokr_config.json")
+                if os.path.exists(config_path) and LoKRConfig is not None:
+                    try:
+                        with open(config_path, 'r') as f:
+                            cfg_data = json.load(f)
+                        lokr_config = LoKRConfig(**{k: v for k, v in cfg_data.items()
+                                                     if k in LoKRConfig.__dataclass_fields__})
+                    except Exception as e:
+                        logger.warning(f"Could not load lokr_config.json: {e}, using defaults")
+
+                target_modules = lokr_config.target_modules if lokr_config else ["q_proj", "k_proj", "v_proj", "o_proj"]
+                modules_pattern = "|".join(target_modules)
+                target_regex = f".*({modules_pattern})$"
+                LycorisNetwork.apply_preset({"target_name": [target_regex]})
+
+                factor = lokr_config.factor if lokr_config else -1
+                lokr_kwargs = {"algo": "lokr", "factor": factor}
+                linear_dim = lokr_config.linear_dim if lokr_config else 10000
+                linear_alpha = lokr_config.linear_alpha if lokr_config else 1.0
+
+                lycoris_net = create_lycoris(
+                    self.model.decoder,
+                    multiplier=1.0,
+                    linear_dim=linear_dim,
+                    linear_alpha=linear_alpha,
+                    **lokr_kwargs,
+                )
+                lycoris_net.apply_to()
+                lycoris_net.load_weights(lokr_weights_path)
+
+                lycoris_net = lycoris_net.to(self.device).to(self.dtype)
+                self.model.decoder = self.model.decoder.to(self.device).to(self.dtype)
+                self.model.decoder.eval()
+                self.model.decoder._lycoris_net = lycoris_net
+
+                logger.info(f"LoKr adapter loaded from {lokr_weights_path}")
+                adapter_label = "LoKr"
+            else:
+                try:
+                    from peft import PeftModel
+                except ImportError:
+                    return "❌ PEFT library not installed. Install with: pip install peft"
+
+                logger.info(f"Loading LoRA adapter from {lora_path}")
+                self.model.decoder = PeftModel.from_pretrained(
+                    self.model.decoder,
+                    lora_path,
+                    is_trainable=False,
+                )
+                self.model.decoder = self.model.decoder.to(self.device).to(self.dtype)
+                self.model.decoder.eval()
+                adapter_label = "LoRA"
+
             self.lora_loaded = True
-            self.use_lora = True  # Enable LoRA by default after loading
-            
-            logger.info(f"LoRA adapter loaded successfully from {lora_path}")
-            return f"✅ LoRA loaded from {lora_path}"
-            
+            self.use_lora = True
+
+            if torch.cuda.is_available():
+                vram_after = torch.cuda.memory_allocated() / 1024**3
+                logger.info(f"VRAM after adapter load: {vram_after:.2f} GB (delta: {vram_after - vram_before:+.2f} GB)")
+
+            logger.info(f"{adapter_label} adapter loaded successfully from {lora_path}")
+            return f"✅ {adapter_label} loaded from {lora_path}"
+
         except Exception as e:
-            logger.exception("Failed to load LoRA adapter")
-            return f"❌ Failed to load LoRA: {str(e)}"
-    
+            logger.exception("Failed to load adapter")
+            return f"❌ Failed to load adapter: {str(e)}"
+
     def unload_lora(self) -> str:
-        """Unload LoRA adapter and restore base decoder.
-        
+        """Unload LoRA/LoKr adapter and restore base decoder.
+
+        Uses state_dict restore instead of deepcopy for memory efficiency.
+
         Returns:
             Status message
         """
         if not self.lora_loaded:
-            return "⚠️ No LoRA adapter loaded."
-        
+            return "⚠️ No adapter loaded."
+
         if self._base_decoder is None:
             return "❌ Base decoder backup not found. Cannot restore."
-        
+
         try:
-            import copy
-            # Restore base decoder
-            self.model.decoder = copy.deepcopy(self._base_decoder)
+            if torch.cuda.is_available():
+                vram_before = torch.cuda.memory_allocated() / 1024**3
+
+            lycoris_net = getattr(self.model.decoder, '_lycoris_net', None)
+            if lycoris_net is not None:
+                try:
+                    lycoris_net.restore()
+                except Exception as e:
+                    logger.warning(f"LyCORIS restore failed: {e}")
+                self.model.decoder._lycoris_net = None
+
+            try:
+                from peft import PeftModel
+                if isinstance(self.model.decoder, PeftModel):
+                    self.model.decoder = self.model.decoder.get_base_model()
+            except ImportError:
+                pass
+
+            self.model.decoder.load_state_dict(self._base_decoder, strict=False)
             self.model.decoder = self.model.decoder.to(self.device).to(self.dtype)
             self.model.decoder.eval()
-            
+
             self.lora_loaded = False
             self.use_lora = False
-            self.lora_scale = 1.0  # Reset scale to default
+            self.lora_scale = 1.0
             self._lora_path = None
 
-            logger.info("LoRA unloaded, base decoder restored")
-            return "✅ LoRA unloaded, using base model"
-            
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                vram_after = torch.cuda.memory_allocated() / 1024**3
+                logger.info(f"VRAM after unload: {vram_after:.2f} GB (freed: {vram_before - vram_after:.2f} GB)")
+
+            logger.info("Adapter unloaded, base decoder restored")
+            return "✅ Adapter unloaded, using base model"
+
         except Exception as e:
-            logger.exception("Failed to unload LoRA")
-            return f"❌ Failed to unload LoRA: {str(e)}"
+            logger.exception("Failed to unload adapter")
+            return f"❌ Failed to unload adapter: {str(e)}"
     
     def set_use_lora(self, use_lora: bool) -> str:
         """Toggle LoRA usage for inference.

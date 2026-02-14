@@ -42,12 +42,13 @@ A complete, in-depth guide to training LoRA adapters on ACE-Step 1.5 music gener
 
 ## Overview
 
-This tool lets you fine-tune ACE-Step 1.5 music generation models using LoRA (Low-Rank Adaptation). Instead of retraining the entire 4.5GB model, LoRA trains small adapter weights (43-85MB) that modify the model's behavior. This means:
+This tool lets you fine-tune ACE-Step 1.5 music generation models using **LoRA** (Low-Rank Adaptation) or **LoKr** (Low-Rank Kronecker, via LyCORIS). Instead of retraining the entire 4.5GB model, these adapters train small weights (43-85MB) that modify the model's behavior. This means:
 
 - **Fast training** — minutes to hours instead of days
 - **Small output** — adapter files are 43-85MB, not gigabytes
-- **Stackable** — multiple LoRAs can be swapped without retraining
+- **Stackable** — multiple adapters can be swapped without retraining
 - **Reversible** — the base model is never modified
+- **Two adapter types** — LoRA (default, proven) or LoKr (experimental, potentially more parameter-efficient)
 
 The trainer works with both **turbo** (8-step, fast inference) and **base** (60-step, higher quality) ACE-Step variants.
 
@@ -97,6 +98,14 @@ If you want to use AdamW 8-bit (saves ~30-40% optimizer VRAM), install bitsandby
 ```bash
 # Windows/Linux only (not supported on macOS)
 uv pip install bitsandbytes>=0.43.0
+```
+
+### Optional: LoKr (LyCORIS) Support
+
+If you want to train LoKr adapters (alternative to LoRA), install lycoris-lora:
+
+```bash
+uv pip install lycoris-lora>=2.0.0
 ```
 
 ### Models (Auto-Download)
@@ -252,14 +261,7 @@ python launch.py --mode both      # Both UIs (trainer on 7861, captioner on 7862
 3. In the **"1. Load Model"** section, select a checkpoint from the dropdown (e.g., `acestep-v15-turbo`)
 4. Click **"Initialize Service"**
 
-The trainer auto-detects whether you selected a **turbo** or **base** model and configures parameters accordingly:
-
-| Parameter | Turbo | Base / SFT |
-|-----------|-------|------------|
-| Timesteps | 8 discrete steps | 60 continuous steps |
-| Shift | 3.0 | 1.0 |
-| CFG Scale | 0.0 (disabled) | 7.0 |
-| CFG Dropout | 0.1 | 0.1 |
+The trainer auto-detects whether you selected a **turbo** or **base** model and configures parameters accordingly. Both model types use logit-normal timestep sampling and CFG dropout with the model's learned null embedding — the parameters are read from `config.json`.
 
 ### Step 3: Build Your Dataset
 
@@ -317,22 +319,40 @@ You can either select a **GPU Preset** for one-click configuration, or manually 
 
 After training, you have two options:
 
-**Option A: Use the LoRA adapter directly**
+**Option A: Use the adapter directly**
 - The adapter files in `best/adapter/` or `final/adapter/` can be loaded at inference time
 - Small file size (~43-85MB depending on rank)
 - Requires the base model + adapter at inference
+- Works for both LoRA and LoKr adapters
 
-**Option B: Merge LoRA into base model**
-- Creates a standalone model with the LoRA baked in
+**Option B: Merge adapter into base model**
+- Creates a standalone model with the adapter baked in
 - No need to load the adapter separately at inference
 - Output is a full safetensors file (~4.5GB)
-- Go to the **"Merge"** section, select base model + LoRA checkpoint, click **"Merge"**
+- Go to the **"Merge"** section, select base model + adapter checkpoint, click **"Merge"**
+- The merge tab auto-detects adapter type (LoRA or LoKr) from checkpoint files
 
 ---
 
 ## Understanding the Parameters
 
-### LoRA Architecture
+### Adapter Type: LoRA vs LoKr
+
+The trainer supports two adapter types, selectable via the **Adapter Type** radio in the UI:
+
+| | LoRA (default) | LoKr (experimental) |
+|---|---|---|
+| **Library** | PEFT (HuggingFace) | LyCORIS |
+| **Method** | Low-Rank decomposition (A × B) | Kronecker product factorization |
+| **Maturity** | Proven, widely used | Experimental, fewer users |
+| **Install** | `peft` (included) | `lycoris-lora>=2.0.0` (optional) |
+| **File format** | `adapter_config.json` + `adapter_model.safetensors` | `lokr_config.json` + `lokr_weights.safetensors` |
+
+Both adapters target the same attention layers and use the same training loop (flow matching, timestep sampling, CFG dropout). The only difference is how the weight modifications are factorized.
+
+**When to use LoKr:** If you want to experiment with potentially more parameter-efficient factorization. LoKr can sometimes achieve similar quality with fewer trainable parameters. However, LoRA is better tested and recommended for most users.
+
+### LoRA Parameters
 
 | Parameter | Default | Range | What It Does |
 |-----------|---------|-------|--------------|
@@ -340,8 +360,19 @@ After training, you have two options:
 | **Alpha** | 128 | 4-512 | Scaling factor. Common practice: set to 2× rank. Higher alpha = stronger LoRA effect. |
 | **Dropout** | 0.1 | 0.0-0.5 | Regularization. 0.1 is a safe default. Increase to 0.15-0.2 if overfitting on small datasets. |
 
-**How LoRA works in this model:**
-LoRA is injected into the DiT (Diffusion Transformer) decoder's attention layers. Specifically, it targets the `q_proj`, `k_proj`, `v_proj`, and `o_proj` linear projections inside every attention block. The encoder, VAE, and tokenizer are **never modified** — only the decoder learns.
+### LoKr Parameters
+
+| Parameter | Default | What It Does |
+|-----------|---------|--------------|
+| **Factor** | -1 (auto) | Kronecker factor. -1 = automatic (sqrt of dimension). Controls how the weight matrix is decomposed. |
+| **Linear Dim** | 10000 (auto) | Rank for the linear component. 10000 signals auto-selection based on factor. |
+| **Linear Alpha** | 1.0 | Scaling factor for the LoKr adapter. |
+| **Decompose Both** | Off | If on, applies Kronecker decomposition to both factors (more parameters, more expressive). |
+| **Use Tucker** | Off | If on, uses Tucker decomposition for even finer factorization. |
+| **Dropout** | 0.0 | Dropout for LoKr layers. |
+
+**How adapters work in this model:**
+Both LoRA and LoKr are injected into the DiT (Diffusion Transformer) decoder's attention layers. Specifically, they target the `q_proj`, `k_proj`, `v_proj`, and `o_proj` linear projections inside every attention block. The encoder, VAE, and tokenizer are **never modified** — only the decoder learns.
 
 ### Optimizers
 
@@ -433,16 +464,18 @@ The model learns by predicting the "flow" between noise and data. Loss is the MS
 
 ### Turbo vs Base Model Training
 
+Both model types now use the **same corrected training algorithm** — logit-normal timestep sampling and CFG dropout with the model's learned null embedding. The parameters (`timestep_mu`, `timestep_sigma`) are read from each model's `config.json` automatically.
+
 | Aspect | Turbo | Base / SFT |
 |--------|-------|------------|
-| **Timestep sampling** | 8 discrete steps from a pre-computed shifted schedule | Continuous timesteps sampled from [0,1] with shift transformation |
-| **CFG (Classifier-Free Guidance)** | Disabled during training (guidance_scale=0) | Enabled with dropout — randomly zeros out text conditioning with probability `cfg_dropout_prob` so the model learns both conditioned and unconditioned generation |
+| **Timestep sampling** | Logit-normal (μ=-0.4, σ=1.0 from config) | Logit-normal (μ=-0.4, σ=1.0 from config) |
+| **CFG dropout** | 15% with `null_condition_emb` | 15% with `null_condition_emb` |
 | **Inference speed** | Fast (8 steps) | Slower (60 steps) but potentially higher quality |
-| **Shift parameter** | 3.0 (default) | 1.0 (default) |
+| **Inference shift** | 3.0 | 1.0 |
 
 **When to use which:**
 - **Turbo** — faster iteration, good for style transfer, most common choice
-- **Base** — if you need maximum quality and don't mind slower inference
+- **Base / SFT** — maximum quality, fully supported with correct training (logit-normal timesteps match pre-training distribution)
 
 ---
 
@@ -587,16 +620,18 @@ Training can be resumed from any saved checkpoint. The checkpoint contains:
 3. Select a checkpoint from the dropdown (e.g., `epoch_300`)
 4. Start training — it continues from exactly where it left off
 
-### LoRA Merge into Base Model
+### Adapter Merge into Base Model
 
-Merges the LoRA adapter weights directly into the base model, producing a standalone safetensors file that doesn't need the adapter at inference time.
+Merges the adapter weights (LoRA or LoKr) directly into the base model, producing a standalone safetensors file that doesn't need the adapter at inference time.
 
 **Process:**
 1. Go to the "Merge" section
 2. Select the base model checkpoint (e.g., `acestep-v15-turbo`)
-3. Select the LoRA checkpoint (from `best/` or `final/` or any epoch)
+3. Select the adapter checkpoint (from `best/` or `final/` or any epoch)
 4. Choose output directory (default: `checkpoints/acestep-v15-merged`)
-5. Click "Merge" — loads model to CPU (VRAM-safe), applies PEFT adapter, calls `merge_and_unload()`, saves as safetensors
+5. Click "Merge" — the merge tab auto-detects the adapter type:
+   - **LoRA**: Uses PEFT's `merge_and_unload()` to bake weights into the model
+   - **LoKr**: Uses LyCORIS's `merge_to()` to apply Kronecker factors to the base weights
 
 **Output:** A full model directory with `model.safetensors` (~4.5GB) and `silence_latent.pt` that can be used directly as a checkpoint.
 
@@ -661,9 +696,10 @@ If the model detects no lyrics (instrumental track), it outputs `[Instrumental]`
 - Switch attention type to "self" only
 
 **Checkpoint dropdown is empty**
-- Ensure models are in `./checkpoints/acestep-v15-turbo/` (or similar)
-- The directory must contain a `config.json` file
+- The trainer scans both `./checkpoints/` and `./ACE-Step-1.5/checkpoints/` (for Pinokio layout)
+- Each checkpoint directory must contain a `config.json` file
 - Directory name must start with `acestep-v15-`
+- If using Pinokio, ensure the symlink from `ACE-Step-1.5/checkpoints/` to the shared drive is intact
 
 **Loss is NaN or explodes**
 - Reduce learning rate (try 5e-5 or 1e-5)

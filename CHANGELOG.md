@@ -1,5 +1,59 @@
 # Changelog
 
+## 2026-02-14b — LoKr Support, Upstream Optimizations & Bug Fixes
+
+### LoKr (Low-Rank Kronecker) Training Support
+
+Added full LoKr adapter training as an alternative to LoRA, powered by the [LyCORIS](https://github.com/KohakuBlueleaf/LyCORIS) library.
+
+**New files:**
+- `acestep/training/lokr_utils.py` — LoKr injection, save/load/merge utilities
+- `acestep/training/configs.py` — New `LoKRConfig` dataclass
+
+**What changed:**
+- **Training UI** — New "Adapter Type" radio selector (LoRA / LoKr) with conditional parameter panels. LoKr settings: Factor (-1 = auto), Linear Dim (10000 = auto), Linear Alpha, Decompose Both, Use Tucker, Dropout.
+- **Trainer** — `PreprocessedLoRAModule` and `LoRATrainer` now branch on `adapter_type` for injection, save, load, merge, gradient clipping, and Fabric setup. The training loop (flow matching, timestep sampling, CFG dropout) is identical for both adapters.
+- **Merge tab** — Auto-detects adapter type from checkpoint files (`adapter_config.json` = PEFT LoRA, `lokr_config.json` = LyCORIS LoKr).
+- **Inference loader** (`handler.py`) — `load_lora()` auto-detects and loads both LoRA (PEFT) and LoKr (LyCORIS) adapters. `unload_lora()` cleans up both adapter types.
+
+**LoKr vs LoRA:**
+- LoKr uses Kronecker product factorization — often more parameter-efficient at similar expressiveness
+- LoKr is experimental and requires `lycoris-lora>=2.0.0` (optional dependency, commented in `requirements.txt`)
+- LoRA remains the default and recommended option
+
+### Upstream ACE-Step 1.5 Optimizations Integrated
+
+Integrated key improvements from the upstream [ACE-Step 1.5](https://github.com/ace-step/ACE-Step-1.5) repository:
+
+**PR #499 — LoRA Memory Bloat Fix (70% VRAM reduction on load/unload)**
+- Replaced `copy.deepcopy(model.decoder)` with CPU `state_dict()` backup for the base decoder
+- Loading a LoRA/LoKr adapter no longer doubles VRAM usage (~10-15GB saved)
+- Unloading restores from CPU state_dict + calls `torch.cuda.empty_cache()`
+- VRAM usage is logged before/after load and unload operations
+
+**PR #554 — Opus and AAC Output Formats**
+- `AudioSaver` now supports `opus` and `aac` formats via ffmpeg backend
+- Added to format validation, extension handling, and convert functions
+- Gradio UI dropdown updated with new format options
+
+**PR #492 — Batch LLM Load/Offload Optimization**
+- `_load_model_context()` made reentrant: if model is already on GPU, nested calls are no-ops
+- Batch loop in `_run_pt()` wrapped in a single `_load_model_context()` so the LLM loads once and offloads once per batch (was N loads + N offloads before)
+
+**PR #493 — Phase-Aware max_new_tokens / Progress Bar Fix**
+- New `_compute_max_new_tokens()` method replaces inline calculations
+- In "codes" phase, buffer is +10 tokens (not +500) since constrained decoder forces exact EOS
+- Fixes progress bar appearing to stall at ~66% during codes generation
+
+### Bug Fix: Checkpoint Discovery for Pinokio Layout
+
+- `get_checkpoints_dir()` now searches both `ACE-Step-1.5/checkpoints/` and `checkpoints/` directories
+- New `_get_all_checkpoint_dirs()` scans all known checkpoint locations with deduplication
+- New `resolve_checkpoint_path()` resolves checkpoint names to full paths across all directories
+- Fixes empty "Model Checkpoint" dropdown when running under Pinokio (where base models are symlinked to `ACE-Step-1.5/checkpoints/`, not `checkpoints/`)
+
+---
+
 ## 2026-02-14 — Training Quality Fix: Corrected Timestep Sampling & CFG Dropout
 
 ### Background — How We Found These Issues
