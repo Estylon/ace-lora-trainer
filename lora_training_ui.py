@@ -771,7 +771,7 @@ def get_vram_info() -> dict:
             return {"available": False, "error": "CUDA not available"}
 
         gpu_name = torch.cuda.get_device_name(0)
-        total = torch.cuda.get_device_properties(0).total_mem / (1024**3)
+        total = torch.cuda.get_device_properties(0).total_memory / (1024**3)
         reserved = torch.cuda.memory_reserved(0) / (1024**3)
         allocated = torch.cuda.memory_allocated(0) / (1024**3)
 
