@@ -939,13 +939,24 @@ class LoRATrainer:
                 yield global_step, avg_epoch_loss, f"💾 Checkpoint saved at epoch {epoch+1}"
 
         # Save final model
+        # If we have a best model from MA5 tracking, copy it as final.
+        # Otherwise save the current (last epoch) weights as final.
         final_path = os.path.join(self.training_config.output_dir, "final")
-        self._save_adapter_weights(final_path)
-
+        best_path = os.path.join(self.training_config.output_dir, "best")
         adapter_label = "LoKr" if self.module.adapter_type == "lokr" else "LoRA"
         final_loss = self.module.training_losses[-1] if self.module.training_losses else 0.0
-        yield global_step, final_loss, f"✅ Training complete! {adapter_label} saved to {final_path} (best loss: {best_loss:.4f} at epoch {best_epoch})"
-    
+
+        if best_tracking_active and best_epoch > 0 and os.path.exists(best_path):
+            # Copy best MA5 model as final output
+            import shutil
+            if os.path.exists(final_path):
+                shutil.rmtree(final_path)
+            shutil.copytree(best_path, final_path)
+            yield global_step, final_loss, f"✅ Training complete! {adapter_label} final = best MA5 (epoch {best_epoch}, MA5: {best_loss:.4f}) saved to {final_path}"
+        else:
+            self._save_adapter_weights(final_path)
+            yield global_step, final_loss, f"✅ Training complete! {adapter_label} saved to {final_path} (last epoch weights)"
+
     def _train_basic(
         self,
         data_module: PreprocessedDataModule,
@@ -1223,13 +1234,22 @@ class LoRATrainer:
                 self._save_adapter_checkpoint(optimizer, scheduler, epoch + 1, global_step, checkpoint_dir)
                 yield global_step, avg_epoch_loss, f"💾 Checkpoint saved"
 
+        # Save final model — prefer best MA5 model over last epoch weights
         final_path = os.path.join(self.training_config.output_dir, "final")
-        self._save_adapter_weights(final_path)
-
+        best_path = os.path.join(self.training_config.output_dir, "best")
         adapter_label = "LoKr" if self.module.adapter_type == "lokr" else "LoRA"
         final_loss = self.module.training_losses[-1] if self.module.training_losses else 0.0
-        yield global_step, final_loss, f"✅ Training complete! {adapter_label} saved to {final_path} (best loss: {best_loss:.4f} at epoch {best_epoch})"
-    
+
+        if best_tracking_active and best_epoch > 0 and os.path.exists(best_path):
+            import shutil
+            if os.path.exists(final_path):
+                shutil.rmtree(final_path)
+            shutil.copytree(best_path, final_path)
+            yield global_step, final_loss, f"✅ Training complete! {adapter_label} final = best MA5 (epoch {best_epoch}, MA5: {best_loss:.4f}) saved to {final_path}"
+        else:
+            self._save_adapter_weights(final_path)
+            yield global_step, final_loss, f"✅ Training complete! {adapter_label} saved to {final_path} (last epoch weights)"
+
     def stop(self):
         """Stop training."""
         self.is_training = False
