@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-02-16a — Optional LLM Download for Auto-Labeling
+
+The LLM for AI auto-labeling is now fully optional with on-demand download.
+
+**Changes:**
+- Added **"Download & Enable AI Labeling (~3.5 GB)"** button in the Dataset tab's auto-label section
+- LLM is no longer required at startup — users can download it when needed
+- Auto-label error message now directs users to either download the LLM or use CSV/manual labeling
+- Info box recommends standalone captioning tools for higher quality captions (importable via CSV)
+
+---
+
 ## 2026-02-15f — Fix Preprocessing Crash (VAE not loaded)
 
 **Bug:** Preprocessing failed with `AttributeError: 'NoneType' object has no attribute 'dtype'` because lazy loading only loaded the DiT model at initialization, leaving VAE and text encoder as `None`. Preprocessing requires both.

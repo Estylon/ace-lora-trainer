@@ -345,6 +345,72 @@ def unload_service() -> Tuple[str, str]:
     return "✅ Service unloaded, GPU memory freed", get_status_html()
 
 
+def download_and_init_llm(progress=gr.Progress()):
+    """Download the LLM model (if not present) and initialize it for auto-labeling.
+
+    The LLM (~3.5 GB for 1.7B) generates captions, genre tags, BPM, key, and
+    time signature from audio.  It is optional — users can always label via CSV
+    or manually.
+    """
+    global llm_handler
+
+    if dit_handler is None:
+        return "❌ Initialize service first (Step 1)", get_status_html()
+
+    # Already loaded?
+    if llm_handler is not None and llm_handler.llm_initialized:
+        return "✅ LLM already loaded and ready", get_status_html()
+
+    from acestep.llm_inference import LLMHandler
+    from acestep.model_downloader import ensure_lm_model
+    from pathlib import Path
+
+    checkpoint_dir = str(get_checkpoints_dir())
+    checkpoint_path = Path(checkpoint_dir)
+
+    # Determine best available LLM (prefer 4B > 1.7B)
+    lm_models_to_try = ["acestep-5Hz-lm-4B", "acestep-5Hz-lm-1.7B"]
+    llm_model_found = None
+
+    for lm_model in lm_models_to_try:
+        lm_model_path = os.path.join(checkpoint_dir, lm_model)
+        weights_path = os.path.join(lm_model_path, "model-00001-of-00002.safetensors")
+        if os.path.exists(weights_path):
+            llm_model_found = lm_model
+            break
+
+    # If no LLM found locally, download the default (1.7B)
+    if not llm_model_found:
+        progress(0.1, desc="Downloading LLM model (~3.5 GB)... this may take a while")
+        logger.info("[download_and_init_llm] No LLM found, downloading acestep-5Hz-lm-1.7B...")
+        success, msg = ensure_lm_model("acestep-5Hz-lm-1.7B", checkpoint_path)
+        if not success:
+            return f"❌ Failed to download LLM: {msg}", get_status_html()
+        llm_model_found = "acestep-5Hz-lm-1.7B"
+        logger.info(f"[download_and_init_llm] {msg}")
+
+    # Initialize the LLM
+    progress(0.6, desc=f"Loading LLM: {llm_model_found}...")
+    try:
+        llm_handler = LLMHandler()
+        llm_status, llm_success = llm_handler.initialize(
+            checkpoint_dir=checkpoint_dir,
+            lm_model_path=llm_model_found,
+            backend="pt",
+            device="auto",
+            offload_to_cpu=False,
+        )
+        if not llm_success:
+            llm_handler = None
+            return f"❌ LLM initialization failed: {llm_status}", get_status_html()
+    except Exception as e:
+        llm_handler = None
+        return f"❌ LLM initialization error: {e}", get_status_html()
+
+    progress(1.0, desc="Done!")
+    return f"✅ LLM ready: {llm_model_found}", get_status_html()
+
+
 # ============== Audio Split Functions ==============
 
 def split_audio_files(
@@ -580,7 +646,7 @@ def auto_label_samples(skip_metas: bool, only_unlabeled: bool, builder_state, pr
         return builder_state.get_samples_dataframe_data(), "❌ Initialize service first (Step 1)", builder_state, get_status_html()
 
     if llm_handler is None or not llm_handler.llm_initialized:
-        return builder_state.get_samples_dataframe_data(), "❌ LLM not available. Use CSV metadata or manual labeling.", builder_state, get_status_html()
+        return builder_state.get_samples_dataframe_data(), "❌ LLM not loaded. Click 'Download & Enable AI Labeling' first, or use CSV metadata / manual labeling instead.", builder_state, get_status_html()
 
     def progress_callback(msg):
         progress(0.5, desc=msg)
@@ -1937,8 +2003,18 @@ def create_ui():
             )
 
             # Auto-Label Section
-            with gr.Accordion("🤖 Auto-Label with AI", open=True):
-                gr.HTML('<div class="info-box">Uses AI to generate captions, genre tags, BPM, key, and time signature for each audio file.</div>')
+            with gr.Accordion("🤖 Auto-Label with AI (optional)", open=True):
+                gr.HTML(
+                    '<div class="info-box">'
+                    'Uses the 5Hz LM model to generate captions, genre tags, BPM, key, and time signature for each audio file.<br>'
+                    '<b>Optional:</b> You can also label samples manually or via CSV import without the LLM.<br>'
+                    '💡 <b>Tip:</b> For higher quality captions, consider using a dedicated audio captioning tool '
+                    'and importing the results via CSV. Standalone captioners generally provide more accurate and detailed descriptions.'
+                    '</div>'
+                )
+                with gr.Row():
+                    download_llm_btn = gr.Button("⬇️ Download & Enable AI Labeling (~3.5 GB)", variant="secondary")
+                    llm_download_status = gr.Textbox(label="LLM Status", interactive=False, scale=2)
                 with gr.Row():
                     skip_metas = gr.Checkbox(label="Skip BPM/Key (use CSV)", value=False)
                     only_unlabeled = gr.Checkbox(label="Only unlabeled", value=False)
@@ -2319,6 +2395,11 @@ def create_ui():
             fn=load_existing_dataset,
             inputs=[load_dataset_path, dataset_builder_state],
             outputs=[scan_status, audio_files_table, sample_selector, dataset_builder_state, status_bar],
+        )
+        download_llm_btn.click(
+            fn=download_and_init_llm,
+            inputs=[],
+            outputs=[llm_download_status, status_bar],
         )
         auto_label_btn.click(
             fn=auto_label_samples,
