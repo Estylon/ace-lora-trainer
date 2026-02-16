@@ -145,6 +145,79 @@ class AceStepCaptioner:
             text = text[len("assistant"):].strip()
         return text
 
+    @staticmethod
+    def _parse_key(raw: str) -> str:
+        """Extract musical key from model output using cascading regex patterns."""
+        import re
+
+        # 1. Structured "key: D Minor" or "key: C# Major"
+        m = re.search(r'key[:\s]+([A-Ga-g][#b♯♭]?\s*(?:natural\s+)?(?:major|minor|maj|min))', raw, re.IGNORECASE)
+        if m:
+            val = m.group(1).strip().title()
+            return re.sub(r'\s*Natural\s+', ' ', val).strip()
+
+        # 2. Shorthand "key: Dm" or "key: D#m"
+        m = re.search(r'key[:\s]+([A-Ga-g][#b♯♭]?)\s*m\b', raw, re.IGNORECASE)
+        if m:
+            return m.group(1).strip().upper() + " Minor"
+
+        # 3. "key: D" (note only) — check nearby text for major/minor
+        m = re.search(r'key[:\s]+([A-Ga-g][#b♯♭]?)\b', raw, re.IGNORECASE)
+        if m:
+            note = m.group(1).strip().upper()
+            after = raw[m.end():m.end() + 30].lower()
+            if 'min' in after:
+                return f"{note} Minor"
+            elif 'maj' in after:
+                return f"{note} Major"
+            return note
+
+        # 4. Anywhere: "D Minor", "C# Major", "Bb minor" etc.
+        m = re.search(r'\b([A-G][#b♯♭]?\s+(?:major|minor|maj|min))\b', raw, re.IGNORECASE)
+        if m:
+            return m.group(1).strip().title()
+
+        # 5. Anywhere: "in D minor", "the key of A"
+        m = re.search(r'(?:in|of)\s+([A-G][#b♯♭]?)\s*(major|minor|maj|min)', raw, re.IGNORECASE)
+        if m:
+            note = m.group(1).strip().upper()
+            mode = "Major" if "maj" in m.group(2).lower() else "Minor"
+            return f"{note} {mode}"
+
+        return ""
+
+    @staticmethod
+    def _parse_genre(raw_lower: str) -> str:
+        """Extract genre from model output (lowercased)."""
+        import re
+
+        # 1. Structured "genre: electronic pop"
+        m = re.search(r'genre[:\s]+([a-z][a-z\s\-/&]+)', raw_lower)
+        if m:
+            genre_val = m.group(1).strip().split('\n')[0].strip()
+            if len(genre_val) > 30:
+                genre_val = genre_val.split(',')[0].strip()
+            # Remove trailing filler words like "music", "style"
+            genre_val = re.sub(r'\s*(music|style|song|track)\s*$', '', genre_val).strip()
+            if genre_val:
+                return genre_val
+
+        # 2. Fallback: check common genre keywords
+        genre_keywords = [
+            "electronic pop", "synth-pop", "synthpop", "hip-hop", "trip-hop",
+            "lo-fi", "lo fi", "r&b", "drum and bass", "drum & bass",
+            "pop", "rock", "jazz", "classical", "electronic", "edm",
+            "hip hop", "rap", "rnb", "folk", "country", "blues",
+            "metal", "punk", "indie", "soul", "reggae", "reggaeton",
+            "latin", "ballad", "acoustic", "ambient", "house", "techno",
+            "disco", "funk", "gospel", "alternative", "grunge",
+        ]
+        for gk in genre_keywords:
+            if gk in raw_lower:
+                return gk
+
+        return ""
+
     def _run_inference(self, audio_array, prompt: str, max_new_tokens: int = 512) -> str:
         """
         Run inference with a given prompt on pre-loaded audio.
@@ -263,49 +336,22 @@ class AceStepCaptioner:
             try:
                 import re
                 prompt = (
-                    "What is the musical key, time signature, and genre of this audio?\n"
-                    "Reply in EXACTLY this format, one per line:\n"
+                    "Analyze this audio and respond with EXACTLY these three lines:\n"
+                    "key: <note> <Major or Minor>\n"
+                    "time_signature: <number>\n"
+                    "genre: <genre>\n\n"
+                    "Example:\n"
                     "key: D Minor\n"
                     "time_signature: 4\n"
-                    "genre: pop\n"
-                    "Now analyze this audio:"
+                    "genre: electronic pop"
                 )
-                raw = self._run_inference(audio_array, prompt, max_new_tokens=80)
+                raw = self._run_inference(audio_array, prompt, max_new_tokens=100)
                 print(f"  [Metadata] Qwen raw: {repr(raw[:300])}")
 
                 raw_lower = raw.lower()
 
                 # --- Parse key ---
-                # Try structured "key: X Major/Minor" first (most specific)
-                key_match = re.search(r'key[:\s]+([A-Ga-g][#b♯♭]?\s*(?:natural\s+)?(?:major|minor|maj|min))', raw, re.IGNORECASE)
-                if key_match:
-                    val = key_match.group(1).strip().title()
-                    # Normalize "Natural Minor" → "Minor"
-                    metadata["keyscale"] = re.sub(r'\s*Natural\s+', ' ', val).strip()
-                else:
-                    # Try "key: Dm" or "key: D#m" shorthand
-                    key_match2 = re.search(r'key[:\s]+([A-Ga-g][#b♯♭]?)\s*m\b', raw, re.IGNORECASE)
-                    if key_match2:
-                        metadata["keyscale"] = key_match2.group(1).strip().upper() + " Minor"
-                    else:
-                        # Try "key: D" (note only, no mode specified)
-                        key_match3 = re.search(r'key[:\s]+([A-Ga-g][#b♯♭]?)\s*(?:major|minor|maj|min)?', raw, re.IGNORECASE)
-                        if key_match3:
-                            note = key_match3.group(1).strip().upper()
-                            if note:
-                                # Check if major/minor is mentioned nearby
-                                after = raw[key_match3.end():key_match3.end()+20].lower()
-                                if 'min' in after:
-                                    metadata["keyscale"] = f"{note} Minor"
-                                elif 'maj' in after:
-                                    metadata["keyscale"] = f"{note} Major"
-                                else:
-                                    metadata["keyscale"] = note  # Just the note
-                        else:
-                            # Last resort: look for any "X Major/Minor" anywhere in text
-                            key_match4 = re.search(r'\b([A-G][#b♯♭]?\s+(?:major|minor|maj|min))\b', raw, re.IGNORECASE)
-                            if key_match4:
-                                metadata["keyscale"] = key_match4.group(1).strip().title()
+                metadata["keyscale"] = self._parse_key(raw)
 
                 # --- Parse time signature ---
                 ts_match = re.search(r'time.?signature[:\s]+(\d)', raw_lower)
@@ -321,23 +367,7 @@ class AceStepCaptioner:
                         metadata["timesignature"] = "4"
 
                 # --- Parse genre ---
-                genre_match = re.search(r'genre[:\s]+([a-z][a-z\s\-/]+)', raw_lower)
-                if genre_match:
-                    genre_val = genre_match.group(1).strip()
-                    # Take only the first genre word(s), avoid long descriptions
-                    genre_val = genre_val.split('\n')[0].strip()
-                    if len(genre_val) > 30:
-                        genre_val = genre_val.split(',')[0].strip()
-                    metadata["genre"] = genre_val
-                else:
-                    # Fallback: check common genre keywords in the full text
-                    genre_keywords = ["pop", "rock", "jazz", "classical", "electronic", "hip-hop",
-                                      "r&b", "folk", "country", "blues", "metal", "punk", "indie",
-                                      "soul", "reggae", "latin", "ballad", "acoustic"]
-                    for gk in genre_keywords:
-                        if gk in raw_lower:
-                            metadata["genre"] = gk
-                            break
+                metadata["genre"] = self._parse_genre(raw_lower)
 
                 print(f"  [Metadata] Key: {metadata['keyscale']}, TimeSig: {metadata['timesignature']}, Genre: {metadata['genre']}")
 
@@ -849,6 +879,11 @@ def start_captioning_ui(input_dir, activation_tag, generate_lyrics, save_csv, cs
     total_steps = len(audio_files) * steps_per_file
     current_step = 0
 
+    try:
+        import librosa
+    except ImportError:
+        return "❌ librosa not installed. Run: pip install librosa", [], 0
+
     for i, audio_path in enumerate(audio_files):
         # Check if JSON already exists — load existing data to preserve fields
         json_path = input_path / f"{audio_path.stem}.json"
@@ -860,13 +895,27 @@ def start_captioning_ui(input_dir, activation_tag, generate_lyrics, save_csv, cs
             except Exception:
                 pass
 
+        # Load audio ONCE per file and reuse for all steps (caption + metadata + lyrics)
+        try:
+            audio_array, sr = librosa.load(str(audio_path), sr=16000, mono=True)
+        except Exception as e:
+            print(f"  ❌ Failed to load {audio_path.name}: {e}")
+            continue
+
         # Step 1: Caption
         current_step += 1
         if progress:
             step_label = f"[{i+1}/{len(audio_files)}] Caption: {audio_path.name}"
             progress(current_step / total_steps, desc=step_label)
 
-        caption = _ui_captioner.caption_audio(str(audio_path), max_tokens)
+        try:
+            caption = _ui_captioner._run_inference(
+                audio_array,
+                "*Task* Describe this audio in detail",
+                max_tokens,
+            )
+        except Exception as e:
+            caption = f"❌ Error: {e}"
 
         result = {
             "filename": audio_path.name,
@@ -874,18 +923,30 @@ def start_captioning_ui(input_dir, activation_tag, generate_lyrics, save_csv, cs
             "caption": caption,
         }
 
-        # Step 2: Metadata (BPM, duration, key, time signature, genre)
+        # Step 2: Metadata — reuse audio_array (no re-load)
         current_step += 1
         if progress:
             step_label = f"[{i+1}/{len(audio_files)}] Metadata: {audio_path.name}"
             progress(current_step / total_steps, desc=step_label)
 
-        metadata = _ui_captioner.analyze_audio_metadata(str(audio_path))
+        metadata = _ui_captioner.analyze_audio_metadata(
+            str(audio_path), audio_array=audio_array, sr=sr,
+        )
         result["bpm"] = metadata["bpm"]
         result["duration"] = metadata["duration"]
         result["keyscale"] = metadata["keyscale"]
         result["timesignature"] = metadata["timesignature"]
         result["genre"] = metadata["genre"]
+
+        # Fallback: mine the caption text for key/genre if metadata extraction missed them
+        if not result["keyscale"] and caption and not caption.startswith("❌"):
+            result["keyscale"] = AceStepCaptioner._parse_key(caption)
+            if result["keyscale"]:
+                print(f"  [Metadata] Key recovered from caption: {result['keyscale']}")
+        if not result["genre"] and caption and not caption.startswith("❌"):
+            result["genre"] = AceStepCaptioner._parse_genre(caption.lower())
+            if result["genre"]:
+                print(f"  [Metadata] Genre recovered from caption: {result['genre']}")
 
         # Step 3: Lyrics + Language via ACE-Step Transcriber (if enabled)
         if generate_lyrics:
@@ -913,6 +974,11 @@ def start_captioning_ui(input_dir, activation_tag, generate_lyrics, save_csv, cs
         json_path = input_path / f"{audio_path.stem}.json"
         with open(json_path, 'w', encoding='utf-8') as f:
             json.dump(result, f, indent=2, ensure_ascii=False)
+
+        # Free GPU memory between files to prevent OOM on large batches
+        del audio_array
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     # Save CSV if requested
     if save_csv and csv_path and csv_path.strip():

@@ -1,5 +1,21 @@
 # Changelog
 
+## 2026-02-16b — Captioner: Fix OOM + Missing Key/Genre
+
+### Fix OOM on large batches (60+ files)
+- Audio is now loaded **once per file** and reused for caption, metadata, and lyrics (was loading 2-3x)
+- Added `torch.cuda.empty_cache()` between files to release KV cache and prevent VRAM fragmentation
+- Reduces peak VRAM usage significantly for batch captioning
+
+### Fix missing Key Scale and Genre
+- Improved metadata extraction prompt for more reliable structured output from Qwen
+- Extracted key/genre parsing into reusable `_parse_key()` / `_parse_genre()` static methods
+- Added **caption text mining** as fallback: if the structured metadata call fails to extract key or genre, the caption description is searched (e.g., "electronic pop track in D minor")
+- Expanded genre keyword list with compound genres (synth-pop, trip-hop, drum and bass, etc.)
+- Key parser now handles more formats: "in D minor", "the key of A", shorthand "Dm", note-only "D"
+
+---
+
 ## 2026-02-16a — Optional LLM Download + Fix `--mode both`
 
 ### Optional LLM Download for Auto-Labeling
