@@ -117,7 +117,10 @@ class AceStepCaptioner:
 
         try:
             import librosa
+        except ImportError:
+            return "❌ librosa not installed. Run: pip install librosa"
 
+        try:
             # Load audio with librosa (works on all platforms, unlike torchcodec)
             # librosa.load with mono=True returns a 1D array of shape (T,)
             audio_array, sr = librosa.load(audio_path, sr=16000, mono=True)
@@ -221,7 +224,10 @@ class AceStepCaptioner:
         Returns:
             Dict with keys: bpm, duration, keyscale, timesignature, genre
         """
-        import librosa
+        try:
+            import librosa
+        except ImportError:
+            raise ImportError("librosa not installed. Run: pip install librosa")
         import numpy as np
 
         metadata = {
@@ -360,7 +366,10 @@ class AceStepCaptioner:
             if self.transcriber_model is None:
                 return "❌ Transcriber not loaded. Load model first.", "unknown"
 
-            import librosa
+            try:
+                import librosa
+            except ImportError:
+                return "❌ librosa not installed. Run: pip install librosa", "unknown"
 
             audio_array, sr = librosa.load(audio_path, sr=16000, mono=True)
 
