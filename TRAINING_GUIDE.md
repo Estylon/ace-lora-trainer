@@ -81,8 +81,10 @@ The trainer works with both **turbo** (8-step, fast inference) and **base** (60-
 git clone https://github.com/Estylon/ace-lora-trainer.git
 cd ace-lora-trainer
 
-# Create virtual environment
-python -m venv env
+# Create virtual environment (uv preferred, or python fallback)
+uv venv env          # If uv is installed
+# python -m venv env # Fallback if uv is not installed
+
 # Windows:
 env\Scripts\activate
 # Linux/Mac:

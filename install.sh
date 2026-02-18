@@ -14,22 +14,37 @@ echo "  ACE-Step LoRA Trainer + Captioner - Installer"
 echo "============================================================"
 echo ""
 
-# Check Python is available
-if ! command -v python3 &> /dev/null; then
-    echo "[ERROR] Python3 not found. Please install Python 3.10+."
-    echo "        Ubuntu/Debian: sudo apt install python3 python3-venv python3-pip"
-    echo "        macOS: brew install python3"
-    exit 1
+# Check if uv is available (preferred)
+UV_AVAILABLE=0
+if command -v uv &> /dev/null; then
+    UV_AVAILABLE=1
+    echo "[INFO] Found $(uv --version)"
 fi
 
-PYTHON_VERSION=$(python3 --version 2>&1)
-echo "[INFO] Found $PYTHON_VERSION"
+# Fall back to Python if uv is not available
+if [ $UV_AVAILABLE -eq 0 ]; then
+    if ! command -v python3 &> /dev/null; then
+        echo "[ERROR] Neither uv nor Python3 found."
+        echo "        Install uv: curl -LsSf https://astral.sh/uv/install.sh | sh"
+        echo "        Or Python 3.10+:"
+        echo "        Ubuntu/Debian: sudo apt install python3 python3-venv python3-pip"
+        echo "        macOS: brew install python3"
+        exit 1
+    fi
+    PYTHON_VERSION=$(python3 --version 2>&1)
+    echo "[INFO] Found $PYTHON_VERSION (uv not found, using pip fallback)"
+fi
 
 # Create virtual environment if it doesn't exist
 if [ ! -f "env/bin/activate" ]; then
     echo ""
-    echo "[1/3] Creating virtual environment..."
-    python3 -m venv env
+    if [ $UV_AVAILABLE -eq 1 ]; then
+        echo "[1/3] Creating virtual environment with uv..."
+        uv venv env
+    else
+        echo "[1/3] Creating virtual environment with python..."
+        python3 -m venv env
+    fi
     echo "      Done."
 else
     echo "[1/3] Virtual environment already exists, skipping creation."
@@ -40,18 +55,25 @@ echo ""
 echo "[2/3] Activating virtual environment..."
 source env/bin/activate
 
-# Upgrade pip and install uv
+# Install dependencies
 echo ""
 echo "[3/3] Installing dependencies (this may take several minutes)..."
 echo ""
-python -m pip install --upgrade pip > /dev/null 2>&1
-pip install uv > /dev/null 2>&1
 
-# Install all requirements
-if ! uv pip install -r requirements.txt; then
-    echo ""
-    echo "[WARNING] uv install failed, falling back to pip..."
-    pip install -r requirements.txt
+if [ $UV_AVAILABLE -eq 1 ]; then
+    if ! uv pip install -r requirements.txt; then
+        echo ""
+        echo "[WARNING] uv install failed, falling back to pip..."
+        pip install -r requirements.txt
+    fi
+else
+    python -m pip install --upgrade pip > /dev/null 2>&1
+    pip install uv > /dev/null 2>&1
+    if ! uv pip install -r requirements.txt; then
+        echo ""
+        echo "[WARNING] uv install failed, falling back to pip..."
+        pip install -r requirements.txt
+    fi
 fi
 
 # Verify critical packages

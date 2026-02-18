@@ -49,8 +49,9 @@ chmod +x install.sh start.sh
 <summary>Manual installation</summary>
 
 ```bash
-# Create virtual environment
-python -m venv env
+# Create virtual environment (uv preferred, or python fallback)
+uv venv env          # If uv is installed
+# python -m venv env # Fallback if uv is not installed
 
 # Activate — Windows:
 env\Scripts\activate

@@ -12,23 +12,37 @@ echo   ACE-Step LoRA Trainer + Captioner - Installer
 echo ============================================================
 echo.
 
-REM Check Python is available
-python --version >nul 2>&1
-if errorlevel 1 (
-    echo [ERROR] Python not found. Please install Python 3.10+ from https://python.org
-    echo         Make sure to check "Add Python to PATH" during installation.
-    pause
-    exit /b 1
+REM Check if uv is available (preferred)
+set UV_AVAILABLE=0
+uv --version >nul 2>&1
+if not errorlevel 1 (
+    set UV_AVAILABLE=1
+    for /f "tokens=*" %%i in ('uv --version 2^>^&1') do echo [INFO] Found %%i
 )
 
-REM Show Python version
-for /f "tokens=*" %%i in ('python --version 2^>^&1') do echo [INFO] Found %%i
+REM Fall back to Python if uv is not available
+if %UV_AVAILABLE%==0 (
+    python --version >nul 2>&1
+    if errorlevel 1 (
+        echo [ERROR] Neither uv nor Python found.
+        echo         Install uv: https://docs.astral.sh/uv/getting-started/installation/
+        echo         Or Python 3.10+: https://python.org
+        pause
+        exit /b 1
+    )
+    for /f "tokens=*" %%i in ('python --version 2^>^&1') do echo [INFO] Found %%i ^(uv not found, using pip fallback^)
+)
 
 REM Create virtual environment if it doesn't exist
 if not exist "env\Scripts\activate.bat" (
     echo.
-    echo [1/3] Creating virtual environment...
-    python -m venv env
+    if %UV_AVAILABLE%==1 (
+        echo [1/3] Creating virtual environment with uv...
+        uv venv env
+    ) else (
+        echo [1/3] Creating virtual environment with python...
+        python -m venv env
+    )
     if errorlevel 1 (
         echo [ERROR] Failed to create virtual environment.
         pause
@@ -44,24 +58,38 @@ echo.
 echo [2/3] Activating virtual environment...
 call env\Scripts\activate.bat
 
-REM Upgrade pip and install uv
+REM Install dependencies
 echo.
 echo [3/3] Installing dependencies (this may take several minutes)...
 echo.
-python -m pip install --upgrade pip >nul 2>&1
-pip install uv >nul 2>&1
 
-REM Install all requirements
-uv pip install -r requirements.txt
-if errorlevel 1 (
-    echo.
-    echo [WARNING] uv install failed, falling back to pip...
-    pip install -r requirements.txt
+if %UV_AVAILABLE%==1 (
+    uv pip install -r requirements.txt
     if errorlevel 1 (
         echo.
-        echo [ERROR] Installation failed. Check the errors above.
-        pause
-        exit /b 1
+        echo [WARNING] uv install failed, falling back to pip...
+        pip install -r requirements.txt
+        if errorlevel 1 (
+            echo.
+            echo [ERROR] Installation failed. Check the errors above.
+            pause
+            exit /b 1
+        )
+    )
+) else (
+    python -m pip install --upgrade pip >nul 2>&1
+    pip install uv >nul 2>&1
+    uv pip install -r requirements.txt
+    if errorlevel 1 (
+        echo.
+        echo [WARNING] uv install failed, falling back to pip...
+        pip install -r requirements.txt
+        if errorlevel 1 (
+            echo.
+            echo [ERROR] Installation failed. Check the errors above.
+            pause
+            exit /b 1
+        )
     )
 )
 
@@ -85,6 +113,6 @@ echo   Installation complete!
 echo ============================================================
 echo.
 echo   To start the trainer, run:  start.bat
-echo   Or manually:  env\Scripts\activate ^&^& python launch.py
+echo   Or manually:  env\Scripts\activate ^& python launch.py
 echo.
 pause
