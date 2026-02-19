@@ -555,7 +555,7 @@ def scan_audio_directory(
     global workflow_state
 
     if not audio_dir or not audio_dir.strip():
-        return [], "❌ Please select an audio directory", gr.Slider(maximum=0, value=0), builder_state, get_status_html()
+        return [], "❌ Please select an audio directory", gr.update(minimum=0, maximum=1, value=0, step=1, interactive=False, visible=False), builder_state, get_status_html()
 
     progress(0.1, desc="Scanning directory...")
 
@@ -572,7 +572,7 @@ def scan_audio_directory(
     samples, status = builder.scan_directory(audio_dir.strip())
 
     if not samples:
-        return [], status, gr.Slider(maximum=0, value=0), builder, get_status_html()
+        return [], status, gr.update(minimum=0, maximum=1, value=0, step=1, interactive=False, visible=False), builder, get_status_html()
 
     progress(0.6, desc="Processing samples...")
     builder.set_all_instrumental(all_instrumental)
@@ -618,7 +618,8 @@ def scan_audio_directory(
 
     progress(0.9, desc="Building table...")
     table_data = builder.get_samples_dataframe_data()
-    slider_max = max(0, len(samples) - 1)
+    n_samples = len(samples)
+    slider_max = max(1, n_samples - 1)
 
     workflow_state["dataset_loaded"] = True
     workflow_state["dataset_labeled"] = captions_loaded > 0
@@ -628,7 +629,7 @@ def scan_audio_directory(
         status = f"{status}\n🏷️ Loaded {captions_loaded} pre-generated captions from JSON files"
 
     progress(1.0, desc="Done!")
-    return table_data, status, gr.Slider(maximum=slider_max, value=0), builder, get_status_html()
+    return table_data, status, gr.update(minimum=0, maximum=slider_max, value=0, step=1, interactive=(n_samples > 1), visible=True), builder, get_status_html()
 
 
 def load_existing_dataset(dataset_path: str, builder_state, progress=gr.Progress()):
@@ -636,7 +637,7 @@ def load_existing_dataset(dataset_path: str, builder_state, progress=gr.Progress
     global workflow_state
 
     if not dataset_path or not dataset_path.strip():
-        return "❌ Please select a dataset file", [], gr.Slider(maximum=0, value=0), builder_state, get_status_html()
+        return "❌ Please select a dataset file", [], gr.update(minimum=0, maximum=1, value=0, step=1, interactive=False, visible=False), builder_state, get_status_html()
 
     progress(0.2, desc="Loading dataset...")
 
@@ -645,11 +646,12 @@ def load_existing_dataset(dataset_path: str, builder_state, progress=gr.Progress
     samples, status = builder.load_dataset(dataset_path.strip())
 
     if not samples:
-        return status, [], gr.Slider(maximum=0, value=0), builder, get_status_html()
+        return status, [], gr.update(minimum=0, maximum=1, value=0, step=1, interactive=False, visible=False), builder, get_status_html()
 
     progress(0.8, desc="Building table...")
     table_data = builder.get_samples_dataframe_data()
-    slider_max = max(0, len(samples) - 1)
+    n_samples = len(samples)
+    slider_max = max(1, n_samples - 1)
 
     labeled_count = builder.get_labeled_count()
     workflow_state["dataset_loaded"] = True
@@ -658,7 +660,7 @@ def load_existing_dataset(dataset_path: str, builder_state, progress=gr.Progress
     info = f"✅ Loaded: {builder.metadata.name} | {len(samples)} samples ({labeled_count} labeled)"
 
     progress(1.0, desc="Done!")
-    return info, table_data, gr.Slider(maximum=slider_max, value=0), builder, get_status_html()
+    return info, table_data, gr.update(minimum=0, maximum=slider_max, value=0, step=1, interactive=(n_samples > 1), visible=True), builder, get_status_html()
 
 
 def auto_label_samples(skip_metas: bool, only_unlabeled: bool, builder_state, progress=gr.Progress()):
@@ -1912,6 +1914,21 @@ def create_ui():
         # Status Bar
         status_bar = gr.HTML(get_status_html())
 
+        # Profiles
+        with gr.Accordion("💾 Profiles", open=False):
+            with gr.Row(elem_classes="compact-row"):
+                profile_path = gr.Textbox(
+                    label="Profile JSON",
+                    value="./profiles/my_profile.json",
+                    scale=4,
+                )
+                profile_load_picker = gr.Button("📄", scale=0, min_width=45)
+                profile_save_picker = gr.Button("💾", scale=0, min_width=45)
+            with gr.Row():
+                profile_load_btn = gr.Button("📂 Load Profile", variant="secondary", scale=1)
+                profile_save_btn = gr.Button("💾 Save Profile", variant="primary", scale=1)
+            profile_status = gr.Textbox(label="Profile Status", interactive=False, lines=1)
+
         # State
         dataset_builder_state = gr.State(None)
         training_state = gr.State({"is_training": False, "should_stop": False})
@@ -2444,6 +2461,8 @@ def create_ui():
         audio_dir_picker.click(fn=open_folder_picker, outputs=[audio_directory])
         load_dataset_picker.click(fn=pick_json_file, outputs=[load_dataset_path])
         save_path_picker.click(fn=lambda: open_save_file_picker(".json"), outputs=[save_path])
+        profile_load_picker.click(fn=pick_json_file, outputs=[profile_path])
+        profile_save_picker.click(fn=lambda: open_save_file_picker(".json"), outputs=[profile_path])
 
         # Audio Splitter
         split_btn.click(
@@ -2471,6 +2490,18 @@ def create_ui():
         )
         init_btn.click(fn=initialize_service, inputs=[checkpoint_dropdown, custom_ckpt_dir], outputs=[service_status, status_bar, shift, model_type_radio, guidance_scale, num_inference_steps, base_params_group])
         unload_btn.click(fn=unload_service, outputs=[service_status, status_bar])
+
+        # Profiles
+        profile_save_btn.click(
+            fn=save_profile_config,
+            inputs=[profile_path, dataset_builder_state, custom_ckpt_dir, checkpoint_dropdown, split_input_dir, split_output_dir, split_duration, audio_directory, load_dataset_path, dataset_name, custom_tag, tag_position, all_instrumental, genre_ratio, skip_metas, only_unlabeled, save_path, preprocess_output_dir, max_duration_slider, gpu_preset, training_tensor_dir, adapter_type, lora_rank, lora_alpha, lora_dropout, lokr_factor, lokr_linear_dim, lokr_linear_alpha, lokr_decompose_both, lokr_use_tucker, lokr_dropout, learning_rate, max_epochs, batch_size, gradient_accumulation, optimizer_type, scheduler_type, attention_type, model_type_radio, shift, seed, timestep_mu, timestep_sigma, cfg_dropout_prob, guidance_scale, num_inference_steps, save_every_n_epochs, early_stop_enabled, early_stop_patience_val, auto_save_best_after, max_latent_length, gradient_checkpointing_enabled, encoder_offloading_enabled, torch_compile_enabled, lora_output_dir, sample_enabled, sample_every_n, sample_prompt, sample_lyrics, sample_bpm, sample_key, sample_time_sig, sample_duration, sample_strengths, sample_inf_steps, sample_guidance, sample_shift, sample_seed, resume_enabled, resume_dir, resume_checkpoint_dropdown, estimate_tensor_dir, estimate_batches, estimate_granularity, estimate_top_k, export_path, merge_base_model, merge_lora_dir, merge_checkpoint_dropdown, merge_output_dir],
+            outputs=[profile_status],
+        )
+        profile_load_btn.click(
+            fn=load_profile_config,
+            inputs=[profile_path],
+            outputs=[profile_status, audio_files_table, sample_selector, dataset_builder_state, status_bar, custom_ckpt_dir, checkpoint_dropdown, split_input_dir, split_output_dir, split_duration, audio_directory, load_dataset_path, dataset_name, custom_tag, tag_position, all_instrumental, genre_ratio, skip_metas, only_unlabeled, save_path, preprocess_output_dir, max_duration_slider, gpu_preset, training_tensor_dir, adapter_type, lora_rank, lora_alpha, lora_dropout, lokr_factor, lokr_linear_dim, lokr_linear_alpha, lokr_decompose_both, lokr_use_tucker, lokr_dropout, learning_rate, max_epochs, batch_size, gradient_accumulation, optimizer_type, scheduler_type, attention_type, model_type_radio, shift, seed, timestep_mu, timestep_sigma, cfg_dropout_prob, guidance_scale, num_inference_steps, save_every_n_epochs, early_stop_enabled, early_stop_patience_val, auto_save_best_after, max_latent_length, gradient_checkpointing_enabled, encoder_offloading_enabled, torch_compile_enabled, lora_output_dir, sample_enabled, sample_every_n, sample_prompt, sample_lyrics, sample_bpm, sample_key, sample_time_sig, sample_duration, sample_strengths, sample_inf_steps, sample_guidance, sample_shift, sample_seed, resume_enabled, resume_dir, resume_checkpoint_dropdown, estimate_tensor_dir, estimate_batches, estimate_granularity, estimate_top_k, export_path, merge_base_model, merge_lora_dir, merge_checkpoint_dropdown, merge_output_dir, lora_settings_group, lokr_settings_group, sample_params_group, base_params_group, scan_status],
+        )
 
         # Dataset
         scan_btn.click(
@@ -2627,6 +2658,275 @@ def create_ui():
         )
 
     return demo
+
+
+PROFILE_SCHEMA_VERSION = 1
+
+PROFILE_KEYS = [
+    "custom_ckpt_dir",
+    "checkpoint_dropdown",
+    "split_input_dir",
+    "split_output_dir",
+    "split_duration",
+    "audio_directory",
+    "load_dataset_path",
+    "dataset_name",
+    "custom_tag",
+    "tag_position",
+    "all_instrumental",
+    "genre_ratio",
+    "skip_metas",
+    "only_unlabeled",
+    "save_path",
+    "preprocess_output_dir",
+    "max_duration_slider",
+    "gpu_preset",
+    "training_tensor_dir",
+    "adapter_type",
+    "lora_rank",
+    "lora_alpha",
+    "lora_dropout",
+    "lokr_factor",
+    "lokr_linear_dim",
+    "lokr_linear_alpha",
+    "lokr_decompose_both",
+    "lokr_use_tucker",
+    "lokr_dropout",
+    "learning_rate",
+    "max_epochs",
+    "batch_size",
+    "gradient_accumulation",
+    "optimizer_type",
+    "scheduler_type",
+    "attention_type",
+    "model_type_radio",
+    "shift",
+    "seed",
+    "timestep_mu",
+    "timestep_sigma",
+    "cfg_dropout_prob",
+    "guidance_scale",
+    "num_inference_steps",
+    "save_every_n_epochs",
+    "early_stop_enabled",
+    "early_stop_patience_val",
+    "auto_save_best_after",
+    "max_latent_length",
+    "gradient_checkpointing_enabled",
+    "encoder_offloading_enabled",
+    "torch_compile_enabled",
+    "lora_output_dir",
+    "sample_enabled",
+    "sample_every_n",
+    "sample_prompt",
+    "sample_lyrics",
+    "sample_bpm",
+    "sample_key",
+    "sample_time_sig",
+    "sample_duration",
+    "sample_strengths",
+    "sample_inf_steps",
+    "sample_guidance",
+    "sample_shift",
+    "sample_seed",
+    "resume_enabled",
+    "resume_dir",
+    "resume_checkpoint_dropdown",
+    "estimate_tensor_dir",
+    "estimate_batches",
+    "estimate_granularity",
+    "estimate_top_k",
+    "export_path",
+    "merge_base_model",
+    "merge_lora_dir",
+    "merge_checkpoint_dropdown",
+    "merge_output_dir",
+]
+
+
+def _datasetbuilder_to_profile(builder_state):
+    if builder_state is None:
+        return None
+    try:
+        return {
+            "metadata": builder_state.metadata.to_dict() if hasattr(builder_state, "metadata") else {},
+            "samples": [s.to_dict() for s in getattr(builder_state, "samples", [])],
+            "_current_dir": getattr(builder_state, "_current_dir", ""),
+        }
+    except Exception:
+        return None
+
+
+def _datasetbuilder_from_profile(data):
+    if not data:
+        return None
+    from acestep.training.dataset_builder import DatasetBuilder, DatasetMetadata, AudioSample
+
+    b = DatasetBuilder()
+    meta = data.get("metadata", {}) or {}
+    b.metadata = DatasetMetadata(
+        name=meta.get("name", "untitled_dataset"),
+        custom_tag=meta.get("custom_tag", ""),
+        tag_position=meta.get("tag_position", "prepend"),
+        created_at=meta.get("created_at", ""),
+        num_samples=int(meta.get("num_samples", 0) or 0),
+        all_instrumental=bool(meta.get("all_instrumental", True)),
+        genre_ratio=int(meta.get("genre_ratio", 0) or 0),
+    )
+    b.samples = [AudioSample.from_dict(sd) for sd in (data.get("samples", []) or [])]
+    b.metadata.num_samples = len(b.samples)
+    setattr(b, "_current_dir", data.get("_current_dir", "") or "")
+    return b
+
+
+def save_profile_config(profile_path: str, dataset_builder_state, *values) -> str:
+    if not profile_path or not profile_path.strip():
+        return "❌ Please choose a profile path (.json)"
+
+    ui_state = {k: v for k, v in zip(PROFILE_KEYS, values)}
+
+    payload = {
+        "schema_version": PROFILE_SCHEMA_VERSION,
+        "saved_at": time.time(),
+        "workflow_state": dict(workflow_state),
+        "ui_state": ui_state,
+        "dataset_state": _datasetbuilder_to_profile(dataset_builder_state),
+    }
+
+    out_path = profile_path.strip()
+    out_dir = os.path.dirname(out_path)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+
+    ds_count = 0
+    if payload.get("dataset_state") and payload["dataset_state"].get("samples"):
+        ds_count = len(payload["dataset_state"]["samples"])
+
+    return f"✅ Profile saved: {out_path} ({ds_count} samples)"
+
+
+def load_profile_config(profile_path: str):
+    global workflow_state
+
+    in_path = (profile_path or "").strip()
+    if not in_path:
+        return (
+            "❌ Please choose a profile (.json)",
+            [],
+            gr.update(minimum=0, maximum=1, value=0, step=1, interactive=False, visible=False),
+            None,
+            get_status_html(),
+            *[gr.update() for _ in range(len(PROFILE_KEYS))],
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            "",
+        )
+
+    if not os.path.exists(in_path):
+        return (
+            f"❌ Profile not found: {in_path}",
+            [],
+            gr.update(minimum=0, maximum=1, value=0, step=1, interactive=False, visible=False),
+            None,
+            get_status_html(),
+            *[gr.update() for _ in range(len(PROFILE_KEYS))],
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            "",
+        )
+
+    with open(in_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    ws = data.get("workflow_state")
+    if isinstance(ws, dict):
+        workflow_state = {**workflow_state, **ws}
+
+    ui_state = data.get("ui_state") or {}
+
+    builder = _datasetbuilder_from_profile(data.get("dataset_state"))
+    table_data = []
+    slider_update = gr.update(minimum=0, maximum=1, value=0, step=1, interactive=False, visible=False)
+    scan_msg = ""
+
+    if builder is not None and getattr(builder, "samples", None):
+        table_data = builder.get_samples_dataframe_data()
+        n_samples = len(builder.samples)
+        slider_max = max(1, n_samples - 1)
+        slider_update = gr.update(minimum=0, maximum=slider_max, value=0, step=1, interactive=(n_samples > 1), visible=True)
+        labeled_count = builder.get_labeled_count()
+        workflow_state["dataset_loaded"] = True
+        workflow_state["dataset_labeled"] = labeled_count > 0
+        scan_msg = f"✅ Loaded from profile: {builder.metadata.name} | {len(builder.samples)} samples ({labeled_count} labeled)"
+
+    custom_dir = str(ui_state.get("custom_ckpt_dir", "") or "")
+    ckpt_val = ui_state.get("checkpoint_dropdown", None)
+    ckpt_choices = list_available_checkpoints(custom_dir)
+    if ckpt_val not in ckpt_choices:
+        ckpt_val = ckpt_choices[0] if ckpt_choices else None
+
+    merge_base_val = ui_state.get("merge_base_model", None)
+    merge_base_choices = list_available_checkpoints("")
+    if merge_base_val not in merge_base_choices:
+        merge_base_val = merge_base_choices[0] if merge_base_choices else None
+
+    resume_dir = str(ui_state.get("resume_dir", "") or "")
+    resume_ckpt_val = ui_state.get("resume_checkpoint_dropdown", None)
+    resume_ckpt_choices = list_lora_checkpoints(resume_dir) if resume_dir else []
+    if resume_ckpt_val not in resume_ckpt_choices:
+        resume_ckpt_val = resume_ckpt_choices[0] if resume_ckpt_choices else None
+
+    merge_lora_dir = str(ui_state.get("merge_lora_dir", "") or "")
+    merge_ckpt_val = ui_state.get("merge_checkpoint_dropdown", None)
+    merge_ckpt_choices = list_lora_checkpoints(merge_lora_dir) if merge_lora_dir else []
+    if merge_ckpt_val not in merge_ckpt_choices:
+        merge_ckpt_val = merge_ckpt_choices[0] if merge_ckpt_choices else None
+
+    out_vals = []
+    for k in PROFILE_KEYS:
+        if k == "checkpoint_dropdown":
+            out_vals.append(gr.update(choices=ckpt_choices, value=ckpt_val))
+        elif k == "merge_base_model":
+            out_vals.append(gr.update(choices=merge_base_choices, value=merge_base_val))
+        elif k == "resume_checkpoint_dropdown":
+            out_vals.append(gr.update(choices=resume_ckpt_choices, value=resume_ckpt_val))
+        elif k == "merge_checkpoint_dropdown":
+            out_vals.append(gr.update(choices=merge_ckpt_choices, value=merge_ckpt_val))
+        else:
+            out_vals.append(ui_state.get(k, gr.update()))
+
+    adapter_choice = ui_state.get("adapter_type", "LoRA")
+    lora_vis = gr.update(visible=(adapter_choice != "LoKr"))
+    lokr_vis = gr.update(visible=(adapter_choice == "LoKr"))
+
+    sample_enabled_val = bool(ui_state.get("sample_enabled", False))
+    sample_vis = gr.update(visible=sample_enabled_val)
+
+    model_type_val = ui_state.get("model_type_radio", "turbo")
+    base_vis = gr.update(visible=(model_type_val == "base"))
+
+    profile_msg = f"✅ Profile loaded: {in_path}"
+
+    return (
+        profile_msg,
+        table_data,
+        slider_update,
+        builder,
+        get_status_html(),
+        *out_vals,
+        lora_vis,
+        lokr_vis,
+        sample_vis,
+        base_vis,
+        scan_msg,
+    )
 
 
 def main():
