@@ -72,12 +72,23 @@ class PreprocessedTensorDataset(Dataset):
         if os.path.exists(manifest_path):
             with open(manifest_path, 'r') as f:
                 self.manifest = json.load(f)
-            self.sample_paths = self.manifest.get("samples", [])
+            samples = self.manifest.get("samples", [])
+            self.sample_paths = []
+            for s in samples:
+                p = s.get("path") if isinstance(s, dict) else s
+                if not isinstance(p, str):
+                    continue
+                if not os.path.isabs(p):
+                    p = os.path.join(tensor_dir, p)
+                self.sample_paths.append(os.path.normpath(p))
 
             # Build checksum map from v2 manifest
             for detail in self.manifest.get("sample_details", []):
                 if "md5" in detail and "path" in detail:
-                    self._checksum_map[detail["path"]] = detail["md5"]
+                    p = detail["path"]
+                    if not os.path.isabs(p):
+                        p = os.path.join(tensor_dir, p)
+                    self._checksum_map[os.path.normpath(p)] = detail["md5"]
 
             manifest_ver = self.manifest.get("version", 1)
             num_samples = self.manifest.get("num_samples", len(self.sample_paths))
