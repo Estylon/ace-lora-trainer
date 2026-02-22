@@ -532,6 +532,7 @@ class DatasetBuilder:
         transcribe_lyrics: bool = False,
         skip_metas: bool = False,
         progress_callback=None,
+        language_hint: str = "",
     ) -> Tuple[AudioSample, str]:
         """Label a single sample using the LLM.
 
@@ -543,6 +544,7 @@ class DatasetBuilder:
             transcribe_lyrics: If True, use LLM to transcribe lyrics from audio
             skip_metas: If True, skip generating BPM/Key/TimeSig metadata but still generate caption/genre
             progress_callback: Optional callback for progress updates
+            language_hint: If non-empty, override the auto-detected language with this value
 
         Returns:
             Tuple of (updated AudioSample, status message)
@@ -656,12 +658,18 @@ class DatasetBuilder:
             # NOTE: Duration is NOT overwritten from LM metadata.
             # We keep the real audio duration obtained from torchaudio during scan.
 
+            # Apply language override if user specified one
+            if language_hint and not sample.is_instrumental:
+                sample.language = language_hint
+
             sample.labeled = True
             self.samples[sample_idx] = sample
 
             status_msg = f"✅ Labeled: {sample.filename}"
             if skip_metas:
                 status_msg += " (skip metas)"
+            if language_hint and not sample.is_instrumental:
+                status_msg += f" (lang: {language_hint})"
             if status_suffix:
                 status_msg += f" {status_suffix}"
 
@@ -680,6 +688,7 @@ class DatasetBuilder:
         skip_metas: bool = False,
         only_unlabeled: bool = False,
         progress_callback=None,
+        language_hint: str = "",
     ) -> Tuple[List[AudioSample], str]:
         """Label all samples in the dataset.
 
@@ -691,6 +700,7 @@ class DatasetBuilder:
             skip_metas: If True, skip generating BPM/Key/TimeSig but still generate caption/genre
             only_unlabeled: If True, only label samples without caption
             progress_callback: Optional callback for progress updates
+            language_hint: If non-empty, override the auto-detected language with this value
 
         Returns:
             Tuple of (list of updated samples, status message)
@@ -719,7 +729,8 @@ class DatasetBuilder:
                 progress_callback(f"Labeling {idx+1}/{total}: {sample.filename}")
 
             _, status = self.label_sample(
-                i, dit_handler, llm_handler, format_lyrics, transcribe_lyrics, skip_metas, progress_callback
+                i, dit_handler, llm_handler, format_lyrics, transcribe_lyrics, skip_metas, progress_callback,
+                language_hint=language_hint,
             )
 
             if "✅" in status:
@@ -1222,7 +1233,8 @@ class DatasetBuilder:
 
         sample_entries = []
         for p in output_paths:
-            entry = {"path": p, "filename": os.path.basename(p)}
+            # Store relative path in details for portability
+            entry = {"path": os.path.basename(p), "filename": os.path.basename(p)}
             try:
                 entry["file_size_bytes"] = os.path.getsize(p)
                 data = torch.load(p, map_location="cpu")
@@ -1243,11 +1255,13 @@ class DatasetBuilder:
             sample_entries.append(entry)
 
         # Save manifest file listing all preprocessed samples
+        # Use relative paths (just filenames) for portability across different locations
+        relative_paths = [os.path.basename(p) for p in output_paths]
         manifest = {
             "version": 2,
             "created_at": datetime.now().isoformat(),
             "metadata": self.metadata.to_dict(),
-            "samples": output_paths,
+            "samples": relative_paths,
             "sample_details": sample_entries,
             "num_samples": len(output_paths),
             "total_size_bytes": sum(e.get("file_size_bytes", 0) for e in sample_entries),

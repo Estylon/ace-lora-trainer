@@ -663,7 +663,7 @@ def load_existing_dataset(dataset_path: str, builder_state, progress=gr.Progress
     return info, table_data, gr.update(minimum=0, maximum=slider_max, value=0, step=1, interactive=(n_samples > 1), visible=True), builder, get_status_html()
 
 
-def auto_label_samples(skip_metas: bool, only_unlabeled: bool, builder_state, progress=gr.Progress()):
+def auto_label_samples(skip_metas: bool, only_unlabeled: bool, language_hint: str, builder_state, progress=gr.Progress()):
     """Auto-label samples using AI."""
     global workflow_state
 
@@ -687,6 +687,11 @@ def auto_label_samples(skip_metas: bool, only_unlabeled: bool, builder_state, pr
     def progress_callback(msg):
         progress(0.5, desc=msg)
 
+    # Normalize language hint (empty string or "auto" means no override)
+    lang_override = language_hint.strip() if language_hint else ""
+    if lang_override.lower() in ("auto", "auto-detect"):
+        lang_override = ""
+
     progress(0.1, desc="Starting auto-labeling...")
 
     samples, status = builder_state.label_all_samples(
@@ -697,6 +702,7 @@ def auto_label_samples(skip_metas: bool, only_unlabeled: bool, builder_state, pr
         skip_metas=skip_metas,
         only_unlabeled=only_unlabeled,
         progress_callback=progress_callback,
+        language_hint=lang_override,
     )
 
     workflow_state["dataset_labeled"] = builder_state.get_labeled_count() > 0
@@ -1929,6 +1935,21 @@ def create_ui():
                 profile_save_btn = gr.Button("💾 Save Profile", variant="primary", scale=1)
             profile_status = gr.Textbox(label="Profile Status", interactive=False, lines=1)
 
+            gr.HTML('<hr style="border-color:#444;margin:12px 0">')
+            gr.HTML('<div style="font-size:13px;color:#aaa">🔄 <b>Side-Step Interop</b> — Import/export configs compatible with <a href="https://github.com/koda-dernet/Side-Step" target="_blank" style="color:#8b5cf6">Side-Step</a></div>')
+            with gr.Row(elem_classes="compact-row"):
+                sidestep_path = gr.Textbox(
+                    label="Side-Step Config (.json)",
+                    value="",
+                    placeholder="e.g. ./presets/recommended.json",
+                    scale=4,
+                )
+                sidestep_browse_btn = gr.Button("📄", scale=0, min_width=45)
+            with gr.Row():
+                sidestep_import_btn = gr.Button("📥 Import Side-Step Config", variant="secondary", scale=1)
+                sidestep_export_btn = gr.Button("📤 Export as Side-Step Config", variant="primary", scale=1)
+            sidestep_status = gr.Textbox(label="Side-Step Status", interactive=False, lines=2)
+
         # State
         dataset_builder_state = gr.State(None)
         training_state = gr.State({"is_training": False, "should_stop": False})
@@ -2087,6 +2108,28 @@ def create_ui():
                 with gr.Row():
                     skip_metas = gr.Checkbox(label="Skip BPM/Key (use CSV)", value=False)
                     only_unlabeled = gr.Checkbox(label="Only unlabeled", value=False)
+                    language_hint = gr.Dropdown(
+                        label="Language Override",
+                        choices=[
+                            ("Auto-detect", ""),
+                            ("English", "en"), ("Spanish", "es"), ("French", "fr"),
+                            ("German", "de"), ("Italian", "it"), ("Portuguese", "pt"),
+                            ("Russian", "ru"), ("Chinese (Mandarin)", "zh"),
+                            ("Japanese", "ja"), ("Korean", "ko"), ("Arabic", "ar"),
+                            ("Hindi", "hi"), ("Dutch", "nl"), ("Polish", "pl"),
+                            ("Swedish", "sv"), ("Turkish", "tr"), ("Vietnamese", "vi"),
+                            ("Thai", "th"), ("Indonesian", "id"), ("Ukrainian", "uk"),
+                            ("Czech", "cs"), ("Romanian", "ro"), ("Danish", "da"),
+                            ("Finnish", "fi"), ("Norwegian", "no"), ("Hungarian", "hu"),
+                            ("Bulgarian", "bg"), ("Croatian", "hr"), ("Slovak", "sk"),
+                            ("Serbian", "sr"), ("Greek", "el"), ("Hebrew", "he"),
+                            ("Persian", "fa"), ("Bengali", "bn"), ("Tamil", "ta"),
+                            ("Telugu", "te"), ("Urdu", "ur"), ("Malay", "ms"),
+                            ("Tagalog", "tl"), ("Cantonese", "yue"),
+                        ],
+                        value="",
+                        info="Force a specific language instead of auto-detection",
+                    )
                     auto_label_btn = gr.Button("🏷️ Auto-Label All", variant="primary", elem_classes="primary-action")
                 label_progress = gr.Textbox(label="Progress", interactive=False)
 
@@ -2503,6 +2546,45 @@ def create_ui():
             outputs=[profile_status, audio_files_table, sample_selector, dataset_builder_state, status_bar, custom_ckpt_dir, checkpoint_dropdown, split_input_dir, split_output_dir, split_duration, audio_directory, load_dataset_path, dataset_name, custom_tag, tag_position, all_instrumental, genre_ratio, skip_metas, only_unlabeled, save_path, preprocess_output_dir, max_duration_slider, gpu_preset, training_tensor_dir, adapter_type, lora_rank, lora_alpha, lora_dropout, lokr_factor, lokr_linear_dim, lokr_linear_alpha, lokr_decompose_both, lokr_use_tucker, lokr_dropout, learning_rate, max_epochs, batch_size, gradient_accumulation, optimizer_type, scheduler_type, attention_type, model_type_radio, shift, seed, timestep_mu, timestep_sigma, cfg_dropout_prob, guidance_scale, num_inference_steps, save_every_n_epochs, early_stop_enabled, early_stop_patience_val, auto_save_best_after, max_latent_length, gradient_checkpointing_enabled, encoder_offloading_enabled, torch_compile_enabled, lora_output_dir, sample_enabled, sample_every_n, sample_prompt, sample_lyrics, sample_bpm, sample_key, sample_time_sig, sample_duration, sample_strengths, sample_inf_steps, sample_guidance, sample_shift, sample_seed, resume_enabled, resume_dir, resume_checkpoint_dropdown, estimate_tensor_dir, estimate_batches, estimate_granularity, estimate_top_k, export_path, merge_base_model, merge_lora_dir, merge_checkpoint_dropdown, merge_output_dir, lora_settings_group, lokr_settings_group, sample_params_group, base_params_group, scan_status],
         )
 
+        # Side-Step Interop
+        sidestep_browse_btn.click(fn=pick_json_file, outputs=[sidestep_path])
+
+        # The training-related UI components that Side-Step import maps to
+        _training_ui_components = [
+            lora_rank, lora_alpha, lora_dropout, learning_rate, batch_size,
+            gradient_accumulation, max_epochs, save_every_n_epochs, seed, shift,
+            optimizer_type, scheduler_type, attention_type, cfg_dropout_prob,
+            gradient_checkpointing_enabled, encoder_offloading_enabled,
+            num_inference_steps,
+        ]
+        _training_ui_keys = [
+            "lora_rank", "lora_alpha", "lora_dropout", "learning_rate", "batch_size",
+            "gradient_accumulation", "max_epochs", "save_every_n_epochs", "seed", "shift",
+            "optimizer_type", "scheduler_type", "attention_type", "cfg_dropout_prob",
+            "gradient_checkpointing_enabled", "encoder_offloading_enabled",
+            "num_inference_steps",
+        ]
+
+        def _do_sidestep_import(file_path):
+            status, updates = import_sidestep_config(file_path)
+            if not updates:
+                return [status] + [gr.update() for _ in _training_ui_keys]
+            out = [status]
+            for k in _training_ui_keys:
+                out.append(updates.get(k, gr.update()))
+            return out
+
+        sidestep_import_btn.click(
+            fn=_do_sidestep_import,
+            inputs=[sidestep_path],
+            outputs=[sidestep_status] + _training_ui_components,
+        )
+        sidestep_export_btn.click(
+            fn=export_sidestep_config,
+            inputs=[sidestep_path, custom_ckpt_dir, checkpoint_dropdown, split_input_dir, split_output_dir, split_duration, audio_directory, load_dataset_path, dataset_name, custom_tag, tag_position, all_instrumental, genre_ratio, skip_metas, only_unlabeled, save_path, preprocess_output_dir, max_duration_slider, gpu_preset, training_tensor_dir, adapter_type, lora_rank, lora_alpha, lora_dropout, lokr_factor, lokr_linear_dim, lokr_linear_alpha, lokr_decompose_both, lokr_use_tucker, lokr_dropout, learning_rate, max_epochs, batch_size, gradient_accumulation, optimizer_type, scheduler_type, attention_type, model_type_radio, shift, seed, timestep_mu, timestep_sigma, cfg_dropout_prob, guidance_scale, num_inference_steps, save_every_n_epochs, early_stop_enabled, early_stop_patience_val, auto_save_best_after, max_latent_length, gradient_checkpointing_enabled, encoder_offloading_enabled, torch_compile_enabled, lora_output_dir, sample_enabled, sample_every_n, sample_prompt, sample_lyrics, sample_bpm, sample_key, sample_time_sig, sample_duration, sample_strengths, sample_inf_steps, sample_guidance, sample_shift, sample_seed, resume_enabled, resume_dir, resume_checkpoint_dropdown, estimate_tensor_dir, estimate_batches, estimate_granularity, estimate_top_k, export_path, merge_base_model, merge_lora_dir, merge_checkpoint_dropdown, merge_output_dir],
+            outputs=[sidestep_status],
+        )
+
         # Dataset
         scan_btn.click(
             fn=scan_audio_directory,
@@ -2521,7 +2603,7 @@ def create_ui():
         )
         auto_label_btn.click(
             fn=auto_label_samples,
-            inputs=[skip_metas, only_unlabeled, dataset_builder_state],
+            inputs=[skip_metas, only_unlabeled, language_hint, dataset_builder_state],
             outputs=[audio_files_table, label_progress, dataset_builder_state, status_bar],
         )
         sample_selector.change(
@@ -2927,6 +3009,196 @@ def load_profile_config(profile_path: str):
         base_vis,
         scan_msg,
     )
+
+
+# ============================================================================
+# Side-Step Config Interoperability
+# ============================================================================
+# Shared config format so Side-Step and ace-lora-trainer users can exchange
+# training configurations seamlessly.
+
+# Mapping: Side-Step preset key → ace-lora-trainer PROFILE_KEYS key
+_SIDESTEP_TO_ALT = {
+    "rank":                     "lora_rank",
+    "alpha":                    "lora_alpha",
+    "dropout":                  "lora_dropout",
+    "learning_rate":            "learning_rate",
+    "batch_size":               "batch_size",
+    "gradient_accumulation":    "gradient_accumulation",
+    "epochs":                   "max_epochs",
+    "save_every":               "save_every_n_epochs",
+    "seed":                     "seed",
+    "shift":                    "shift",
+    "optimizer_type":           "optimizer_type",
+    "scheduler_type":           "scheduler_type",
+    "attention_type":           "attention_type",
+    "cfg_ratio":                "cfg_dropout_prob",
+    "gradient_checkpointing":   "gradient_checkpointing_enabled",
+    "offload_encoder":          "encoder_offloading_enabled",
+    "num_inference_steps":      "num_inference_steps",
+}
+
+# Reverse mapping
+_ALT_TO_SIDESTEP = {v: k for k, v in _SIDESTEP_TO_ALT.items()}
+
+
+def _is_sidestep_config(data: dict) -> bool:
+    """Detect whether a JSON file is a Side-Step preset."""
+    # Side-Step presets always have "name" + training fields at the top level
+    # ace-lora-trainer profiles have "schema_version" + "ui_state"
+    if "schema_version" in data or "ui_state" in data:
+        return False
+    # Check for Side-Step-specific fields
+    sidestep_markers = {"rank", "alpha", "epochs", "gradient_accumulation"}
+    return len(sidestep_markers & set(data.keys())) >= 3
+
+
+def import_sidestep_config(file_path: str) -> Tuple[str, list]:
+    """Import a Side-Step preset JSON and return ace-lora-trainer UI values.
+
+    Returns:
+        (status_message, list of gr.update() for PROFILE_KEYS training fields)
+    """
+    fp = (file_path or "").strip()
+    if not fp:
+        return "❌ Please specify a Side-Step config file (.json)", []
+    if not os.path.exists(fp):
+        return f"❌ File not found: {fp}", []
+
+    try:
+        with open(fp, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        return f"❌ Failed to read JSON: {e}", []
+
+    if not _is_sidestep_config(data):
+        return "❌ This doesn't look like a Side-Step config (missing rank/alpha/epochs fields)", []
+
+    preset_name = data.get("name", "unknown")
+    preset_desc = data.get("description", "")
+
+    # Build updates only for the training-related PROFILE_KEYS
+    updates = {}
+    for ss_key, alt_key in _SIDESTEP_TO_ALT.items():
+        if ss_key in data:
+            updates[alt_key] = data[ss_key]
+
+    # Handle optimizer naming differences
+    if "optimizer_type" in updates:
+        opt = str(updates["optimizer_type"]).lower()
+        # Side-Step uses "adamw8bit", ace-lora-trainer uses "AdamW 8-bit"
+        opt_map = {
+            "adamw": "AdamW",
+            "adamw8bit": "AdamW 8-bit",
+            "adafactor": "Adafactor",
+            "prodigy": "Prodigy",
+        }
+        updates["optimizer_type"] = opt_map.get(opt, updates["optimizer_type"])
+
+    # Handle scheduler naming
+    if "scheduler_type" in updates:
+        sched = str(updates["scheduler_type"]).lower()
+        sched_map = {
+            "cosine": "Cosine",
+            "linear": "Linear",
+            "constant": "Constant",
+            "constant_with_warmup": "Constant + Warmup",
+            "cosine_restarts": "Cosine",
+        }
+        updates["scheduler_type"] = sched_map.get(sched, updates["scheduler_type"])
+
+    # Handle attention type
+    if "attention_type" in updates:
+        att = str(updates["attention_type"]).lower()
+        att_map = {"both": "Both", "self": "Self-attention only", "cross": "Cross-attention only"}
+        updates["attention_type"] = att_map.get(att, updates["attention_type"])
+
+    imported_fields = len(updates)
+    status = f"✅ Imported Side-Step preset: \"{preset_name}\""
+    if preset_desc:
+        status += f"\n📝 {preset_desc}"
+    status += f"\n📊 {imported_fields} settings applied"
+
+    return status, updates
+
+
+def export_sidestep_config(export_path: str, *values) -> str:
+    """Export current ace-lora-trainer settings as a Side-Step compatible preset.
+
+    Args:
+        export_path: Destination .json file path
+        *values: Current UI values matching PROFILE_KEYS order
+
+    Returns:
+        Status message
+    """
+    fp = (export_path or "").strip()
+    if not fp:
+        return "❌ Please specify an export path (.json)"
+    if not fp.lower().endswith(".json"):
+        fp += ".json"
+
+    ui_state = {k: v for k, v in zip(PROFILE_KEYS, values)}
+
+    # Build Side-Step preset
+    preset = {
+        "name": os.path.splitext(os.path.basename(fp))[0],
+        "description": f"Exported from ace-lora-trainer",
+    }
+
+    # Reverse-map optimizer names
+    opt_reverse = {
+        "AdamW": "adamw",
+        "AdamW 8-bit": "adamw8bit",
+        "Adafactor": "adafactor",
+        "Prodigy": "prodigy",
+    }
+    sched_reverse = {
+        "Cosine": "cosine",
+        "Linear": "linear",
+        "Constant": "constant",
+        "Constant + Warmup": "constant_with_warmup",
+    }
+    att_reverse = {
+        "Both": "both",
+        "Self-attention only": "self",
+        "Cross-attention only": "cross",
+    }
+
+    for alt_key, ss_key in _ALT_TO_SIDESTEP.items():
+        val = ui_state.get(alt_key)
+        if val is None:
+            continue
+
+        # Transform display names back to Side-Step format
+        if alt_key == "optimizer_type":
+            val = opt_reverse.get(str(val), str(val).lower())
+        elif alt_key == "scheduler_type":
+            val = sched_reverse.get(str(val), str(val).lower())
+        elif alt_key == "attention_type":
+            val = att_reverse.get(str(val), str(val).lower())
+
+        preset[ss_key] = val
+
+    # Add Side-Step standard fields with defaults if not mapped
+    preset.setdefault("target_modules_str", "q_proj k_proj v_proj o_proj")
+    preset.setdefault("bias", "none")
+    preset.setdefault("warmup_steps", 100)
+    preset.setdefault("weight_decay", 0.01)
+    preset.setdefault("max_grad_norm", 1.0)
+    preset.setdefault("loss_weighting", "none")
+    preset.setdefault("snr_gamma", 5.0)
+    preset.setdefault("log_every", 10)
+    preset.setdefault("log_heavy_every", 50)
+
+    out_dir = os.path.dirname(fp)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+
+    with open(fp, "w", encoding="utf-8") as f:
+        json.dump(preset, f, indent=2, ensure_ascii=False)
+
+    return f"✅ Exported Side-Step preset: {fp}\n📊 {len(preset)} fields written"
 
 
 def main():

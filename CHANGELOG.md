@@ -1,5 +1,34 @@
 # Changelog
 
+## 2026-02-22 — Side-Step Interop, Language Override, Bug Fixes
+
+### Side-Step Config Interoperability
+- **Import/export** training configs compatible with [Side-Step](https://github.com/koda-dernet/Side-Step) — the complementary LoRA training toolkit by [@koda-dernet](https://github.com/koda-dernet)
+- **Import:** Load any Side-Step preset JSON (recommended, vram_8gb, high_quality, etc.) and automatically map all 17 training parameters to the ace-lora-trainer UI
+- **Export:** Save current training settings as a Side-Step-compatible preset JSON that works directly in Side-Step's `--preset` flag
+- **Auto-detection:** Import function automatically identifies Side-Step presets vs ace-lora-trainer profiles
+- **Bidirectional field mapping:** Handles naming differences (e.g., `rank` vs `lora_rank`, `adamw8bit` vs `AdamW 8-bit`, `cfg_ratio` vs `cfg_dropout_prob`)
+- **New UI section:** "Side-Step Interop" panel inside the Profiles accordion with browse/import/export buttons
+
+### Language Override for AI Auto-Labeling
+- **New dropdown** in the auto-label section: choose a specific language instead of relying on the 5Hz LM model's auto-detection (which was often random/incorrect for non-English lyrics)
+- **40 languages supported:** English, Spanish, French, German, Italian, Portuguese, Russian, Chinese, Japanese, Korean, Arabic, Hindi, and 28 more
+- **How it works:** The LLM still runs full auto-detection for captions/BPM/key/etc., then the detected language is overridden with the user's selection on all non-instrumental samples
+- **Full stack:** UI dropdown, `label_sample()` and `label_all_samples()` in dataset_builder, API server endpoint
+
+### Fix: Training won't start — tensor files not found (Issue #7)
+- **Bug:** After preprocessing, training failed with "0 samples cached in RAM" because the manifest stored absolute paths. Moving the tensor directory or running from a different location broke all path references
+- **Root cause:** `dataset_builder.py` saved full absolute paths (e.g., `D:\datasets\tensor.pt`) in `manifest.json`. The data module loader expected these exact paths to exist
+- **Fix (manifest writer):** Now stores relative paths (just filenames) in both `samples` and `sample_details` arrays for full portability
+- **Fix (manifest reader):** Resolves relative paths against the tensor directory. Added fallback: if an absolute path doesn't exist, tries to find the file by basename in the tensor directory — handles legacy manifests with absolute paths
+
+### Fix: Sample inference device mismatch during training (Issue #2 follow-up)
+- **Bug:** `RuntimeError: Expected all tensors to be on the same device, but found at least two devices, cuda:0 and cpu!` when sample inference was enabled with encoder offloading
+- **Root cause:** With encoder offloading active, VAE/text_encoder/encoder are on CPU during training. `generate_music()` needs them on GPU but nothing moved them back
+- **Fix:** Before generating samples, explicitly move `vae`, `text_encoder`, and `encoder` to the training device (GPU). After generation, the existing cleanup code moves them back to CPU if offloading is enabled
+
+---
+
 ## 2026-02-18a — Sample Inference During Training + Fix Gradient Checkpointing Crash
 
 ### Auto sample inference during training (Issue #2)

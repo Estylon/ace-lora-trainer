@@ -80,7 +80,15 @@ class PreprocessedTensorDataset(Dataset):
                     continue
                 if not os.path.isabs(p):
                     p = os.path.join(tensor_dir, p)
-                self.sample_paths.append(os.path.normpath(p))
+                resolved = os.path.normpath(p)
+                # Fallback: if absolute path doesn't exist, try by filename in tensor_dir
+                # This handles cases where tensors were preprocessed at a different location
+                if not os.path.exists(resolved):
+                    basename = os.path.basename(resolved)
+                    local_path = os.path.normpath(os.path.join(tensor_dir, basename))
+                    if os.path.exists(local_path):
+                        resolved = local_path
+                self.sample_paths.append(resolved)
 
             # Build checksum map from v2 manifest
             for detail in self.manifest.get("sample_details", []):

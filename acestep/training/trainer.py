@@ -623,6 +623,20 @@ class LoRATrainer:
             if not self.dit_handler._models_loaded:
                 self.dit_handler.ensure_models_loaded()
 
+            # Move encoder components to GPU for inference (they may be on CPU
+            # if encoder_offloading is enabled during training)
+            device = self.dit_handler.device
+            for attr_name in ('vae', 'text_encoder', 'encoder'):
+                component = getattr(self.dit_handler.model, attr_name, None)
+                if component is not None and hasattr(component, 'to'):
+                    try:
+                        component.to(device)
+                    except Exception:
+                        pass
+            # Also ensure silence_latent is on the correct device
+            if hasattr(self.dit_handler, '_ensure_silence_latent_on_device'):
+                self.dit_handler._ensure_silence_latent_on_device()
+
             import torchaudio
 
             for strength in strengths:
