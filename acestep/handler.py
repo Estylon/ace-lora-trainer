@@ -1012,9 +1012,46 @@ class AceStepHandler:
             quantized = quantizer.get_output_from_indices(indices)
             if quantized.dtype != self.dtype:
                 quantized = quantized.to(self.dtype)
-            
+
+            # ── Diagnostic: check quantized output ──
+            q_nan = torch.isnan(quantized).any().item()
+            q_inf = torch.isinf(quantized).any().item()
+            logger.info(f"[_decode_audio_codes] quantized: shape={quantized.shape}, "
+                        f"dtype={quantized.dtype}, "
+                        f"min={quantized.min().item():.4f}, max={quantized.max().item():.4f}, "
+                        f"mean={quantized.float().mean().item():.4f}, "
+                        f"has_nan={q_nan}, has_inf={q_inf}")
+
             # Detokenize to 25Hz: [1, T_5Hz, dim] -> [1, T_25Hz, dim]
-            lm_hints_25hz = detokenizer(quantized)
+            # Run detokenizer in float32 to prevent bf16 overflow in self-attention.
+            # The transformer layers inside detokenizer compute Q·K dot products
+            # that can exceed bf16 range (65504) with long sequences, causing
+            # inf → NaN that propagates through the entire ODE.
+            det_input_dtype = quantized.dtype
+            if det_input_dtype != torch.float32:
+                quantized_f32 = quantized.float()
+                # Temporarily cast detokenizer to float32
+                detokenizer_was_dtype = next(detokenizer.parameters()).dtype
+                detokenizer.float()
+                lm_hints_25hz = detokenizer(quantized_f32)
+                # Cast back to original dtype
+                detokenizer.to(detokenizer_was_dtype)
+                lm_hints_25hz = lm_hints_25hz.to(det_input_dtype)
+            else:
+                lm_hints_25hz = detokenizer(quantized)
+
+            # ── Diagnostic: check detokenizer output ──
+            h_nan = torch.isnan(lm_hints_25hz).any().item()
+            h_inf = torch.isinf(lm_hints_25hz).any().item()
+            logger.info(f"[_decode_audio_codes] lm_hints_25hz: shape={lm_hints_25hz.shape}, "
+                        f"dtype={lm_hints_25hz.dtype}, "
+                        f"min={lm_hints_25hz.min().item():.4f}, max={lm_hints_25hz.max().item():.4f}, "
+                        f"mean={lm_hints_25hz.float().mean().item():.4f}, "
+                        f"has_nan={h_nan}, has_inf={h_inf}")
+            if h_nan or h_inf:
+                logger.error(f"[_decode_audio_codes] WARNING: detokenizer produced "
+                             f"{'NaN' if h_nan else ''} {'Inf' if h_inf else ''} values!")
+
             return lm_hints_25hz
     
     def _create_default_meta(self) -> str:
@@ -2562,6 +2599,58 @@ class AceStepHandler:
         # Add custom timesteps if provided (convert to tensor)
         if timesteps is not None:
             generate_kwargs["timesteps"] = torch.tensor(timesteps, dtype=torch.float32)
+        # ── Pre-generation diagnostic (writes to JSON file for offline analysis) ──
+        diag_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "generation_diagnostics.json")
+        diag_data = {"timestamp": time.strftime("%Y-%m-%d %H:%M:%S"), "tensors": {}, "is_covers": None}
+        logger.info("[service_generate] Pre-ODE tensor checks:")
+        for diag_name, diag_t in [
+            ("src_latents", src_latents),
+            ("silence_latent", self.silence_latent),
+            ("chunk_mask", chunk_mask),
+            ("text_hidden_states", text_hidden_states),
+            ("precomputed_lm_hints_25Hz", precomputed_lm_hints_25Hz),
+        ]:
+            if diag_t is not None:
+                t_f = diag_t.float()
+                has_nan = torch.isnan(diag_t).any().item()
+                has_inf = torch.isinf(diag_t).any().item()
+                stats = {
+                    "shape": list(diag_t.shape),
+                    "dtype": str(diag_t.dtype),
+                    "min": round(t_f.min().item(), 6),
+                    "max": round(t_f.max().item(), 6),
+                    "mean": round(t_f.mean().item(), 6),
+                    "std": round(t_f.std().item(), 6),
+                    "nan": has_nan,
+                    "inf": has_inf,
+                }
+                logger.info(f"  {diag_name}: shape={diag_t.shape}, dtype={diag_t.dtype}, "
+                            f"min={stats['min']:.4f}, max={stats['max']:.4f}, "
+                            f"mean={stats['mean']:.4f}, std={stats['std']:.4f}, "
+                            f"nan={has_nan}, inf={has_inf}")
+                diag_data["tensors"][diag_name] = stats
+            else:
+                logger.info(f"  {diag_name}: None")
+                diag_data["tensors"][diag_name] = None
+
+        # Log is_covers tensor value
+        if is_covers is not None:
+            diag_data["is_covers"] = is_covers.tolist() if hasattr(is_covers, 'tolist') else str(is_covers)
+            logger.info(f"  is_covers: {is_covers}")
+
+        # Compare src_latents vs silence_latent scale
+        if src_latents is not None and self.silence_latent is not None:
+            sl = self.silence_latent.float()
+            sr = src_latents.float()
+            logger.info(f"  [SCALE COMPARE] silence_latent: mean={sl.mean().item():.4f}, std={sl.std().item():.4f}")
+            logger.info(f"  [SCALE COMPARE] src_latents:    mean={sr.mean().item():.4f}, std={sr.std().item():.4f}")
+            diag_data["scale_compare"] = {
+                "silence_mean": round(sl.mean().item(), 6),
+                "silence_std": round(sl.std().item(), 6),
+                "src_mean": round(sr.mean().item(), 6),
+                "src_std": round(sr.std().item(), 6),
+            }
+
         logger.info("[service_generate] Generating audio...")
         with self._load_model_context("model"):
             # Prepare condition tensors first (for LRC timestamp generation)
@@ -3192,26 +3281,68 @@ class AceStepHandler:
             # Update offload cost one last time to include VAE offloading
             time_costs["offload_time_cost"] = self.current_offload_cost
 
-            # ── Peak normalization ─────────────────────────────────────
-            # The VAE decode output may be at unpredictable scale (too loud
-            # or too quiet). Normalize each sample in the batch independently
-            # to a target peak of -1 dBFS (≈0.891 linear) so that the audio
-            # is always at a consistent, audible level.
+            # ── DC offset removal + Peak normalization ──────────────────
+            # Step 1: Remove DC offset (mean subtraction per channel).
+            # The VAE decoder can produce audio with a non-zero mean,
+            # which sounds like noise/hum and ruins the output.
+            # Step 2: Normalize peak to -1 dBFS for consistent volume.
             TARGET_PEAK_DB = -1.0
             target_peak = 10.0 ** (TARGET_PEAK_DB / 20.0)  # ≈ 0.891
             for i in range(pred_wavs.shape[0]):
                 sample = pred_wavs[i]  # [channels, samples]
+                # Log pre-processing stats
+                raw_mean = sample.mean(dim=-1)  # per-channel mean
+                raw_peak = sample.abs().max().item()
+                raw_rms = sample.pow(2).mean().sqrt().item()
+                logger.info(f"[generate_music] Audio {i} RAW: peak={raw_peak:.6f}, "
+                            f"rms={raw_rms:.6f}, "
+                            f"dc_offset=[{raw_mean[0].item():.6f}, {raw_mean[1].item():.6f}]")
+
+                # Remove DC offset (subtract mean per channel)
+                dc_offset = sample.mean(dim=-1, keepdim=True)
+                sample = sample - dc_offset
+                logger.info(f"[generate_music] Audio {i}: DC offset removed "
+                            f"(was [{dc_offset[0,0].item():.6f}, {dc_offset[1,0].item():.6f}])")
+
+                # Peak normalize
                 peak = sample.abs().max().item()
                 if peak > 1e-8:
                     gain = target_peak / peak
-                    pred_wavs[i] = sample * gain
-                    logger.info(f"[generate_music] Audio {i}: raw peak={peak:.6f}, "
-                                f"gain={gain:.2f}x, normalized peak={target_peak:.3f} "
+                    sample = sample * gain
+                    logger.info(f"[generate_music] Audio {i}: post-DC peak={peak:.6f}, "
+                                f"gain={gain:.2f}x, final peak={target_peak:.3f} "
                                 f"({TARGET_PEAK_DB} dBFS)")
                 else:
                     logger.warning(f"[generate_music] Audio {i}: near-silent "
                                    f"(peak={peak:.8f}), skipping normalization")
-            # ── End peak normalization ──────────────────────────────────
+                pred_wavs[i] = sample
+            # ── End DC offset removal + peak normalization ─────────────
+
+            # ── Write diagnostic file ──────────────────────────────────
+            try:
+                # Update diag_data with post-ODE results
+                pl_cpu = pred_latents_cpu.float()
+                diag_data["pred_latents"] = {
+                    "shape": list(pl_cpu.shape),
+                    "min": round(pl_cpu.min().item(), 6),
+                    "max": round(pl_cpu.max().item(), 6),
+                    "mean": round(pl_cpu.mean().item(), 6),
+                    "std": round(pl_cpu.std().item(), 6),
+                    "nan": bool(torch.isnan(pl_cpu).any().item()),
+                    "inf": bool(torch.isinf(pl_cpu).any().item()),
+                }
+                raw_audio = pred_wavs.float()
+                diag_data["audio_output"] = {
+                    "shape": list(raw_audio.shape),
+                    "rms": round(raw_audio.pow(2).mean().sqrt().item(), 6),
+                    "peak": round(raw_audio.abs().max().item(), 6),
+                }
+                with open(diag_path, "w") as f:
+                    json.dump(diag_data, f, indent=2, default=str)
+                logger.info(f"[generate_music] Diagnostics written to {diag_path}")
+            except Exception as e:
+                logger.warning(f"[generate_music] Failed to write diagnostics: {e}")
+            # ── End diagnostic file write ──────────────────────────────
 
             logger.info("[generate_music] VAE decode completed. Preparing audio tensors...")
             if progress:
