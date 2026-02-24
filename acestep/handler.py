@@ -626,7 +626,8 @@ class AceStepHandler:
                 acestep_v15_checkpoint_path,
                 trust_remote_code=True,
                 attn_implementation=attn_implementation,
-                dtype="bfloat16"
+                dtype="bfloat16",
+                low_cpu_mem_usage=False,  # Avoid meta tensors — vector_quantize_pytorch asserts fail on meta device
             )
         except Exception as e:
             logger.warning(f"[_load_dit] Failed with {attn_implementation}: {e}")
@@ -636,7 +637,8 @@ class AceStepHandler:
                 self.model = AutoModel.from_pretrained(
                     acestep_v15_checkpoint_path,
                     trust_remote_code=True,
-                    attn_implementation=attn_implementation
+                    attn_implementation=attn_implementation,
+                    low_cpu_mem_usage=False,
                 )
             else:
                 raise e
@@ -3126,7 +3128,9 @@ class AceStepHandler:
             pred_latents = outputs["target_latents"]  # [batch, latent_length, latent_dim]
             time_costs = outputs["time_costs"]
             time_costs["offload_time_cost"] = self.current_offload_cost
-            logger.debug(f"[generate_music] pred_latents: {pred_latents.shape}, dtype={pred_latents.dtype} {pred_latents.min()=}, {pred_latents.max()=}, {pred_latents.mean()=} {pred_latents.std()=}")
+            logger.info(f"[generate_music] pred_latents: shape={pred_latents.shape}, dtype={pred_latents.dtype}, "
+                        f"min={pred_latents.min().item():.4f}, max={pred_latents.max().item():.4f}, "
+                        f"mean={pred_latents.mean().item():.4f}, std={pred_latents.std().item():.4f}")
             logger.debug(f"[generate_music] time_costs: {time_costs}")
             if progress:
                 progress(0.8, desc="Decoding audio...")
@@ -3148,6 +3152,12 @@ class AceStepHandler:
                     del pred_latents
                     torch.cuda.empty_cache()
                     
+                    logger.info(f"[generate_music] Latents for VAE decode: shape={pred_latents_for_decode.shape}, "
+                                f"dtype={pred_latents_for_decode.dtype}, "
+                                f"min={pred_latents_for_decode.min().item():.4f}, "
+                                f"max={pred_latents_for_decode.max().item():.4f}, "
+                                f"mean={pred_latents_for_decode.mean().item():.4f}, "
+                                f"std={pred_latents_for_decode.std().item():.4f}")
                     logger.debug(f"[generate_music] Before VAE decode: allocated={torch.cuda.memory_allocated()/1024**3:.2f}GB, max={torch.cuda.max_memory_allocated()/1024**3:.2f}GB")
                     
                     if use_tiled_decode:
@@ -3163,18 +3173,46 @@ class AceStepHandler:
                     # Release pred_latents_for_decode after decode
                     del pred_latents_for_decode
                     
+                    # Log raw VAE decode output statistics
+                    logger.info(f"[generate_music] Raw VAE decode: shape={pred_wavs.shape}, "
+                                f"dtype={pred_wavs.dtype}, "
+                                f"min={pred_wavs.min().item():.6f}, "
+                                f"max={pred_wavs.max().item():.6f}, "
+                                f"rms={pred_wavs.float().pow(2).mean().sqrt().item():.6f}")
+
                     # Cast output to float32 for audio processing/saving (in-place if possible)
                     if pred_wavs.dtype != torch.float32:
                         pred_wavs = pred_wavs.float()
-                    
+
                     torch.cuda.empty_cache()
             end_time = time.time()
             time_costs["vae_decode_time_cost"] = end_time - start_time
             time_costs["total_time_cost"] = time_costs["total_time_cost"] + time_costs["vae_decode_time_cost"]
-            
+
             # Update offload cost one last time to include VAE offloading
             time_costs["offload_time_cost"] = self.current_offload_cost
-            
+
+            # ── Peak normalization ─────────────────────────────────────
+            # The VAE decode output may be at unpredictable scale (too loud
+            # or too quiet). Normalize each sample in the batch independently
+            # to a target peak of -1 dBFS (≈0.891 linear) so that the audio
+            # is always at a consistent, audible level.
+            TARGET_PEAK_DB = -1.0
+            target_peak = 10.0 ** (TARGET_PEAK_DB / 20.0)  # ≈ 0.891
+            for i in range(pred_wavs.shape[0]):
+                sample = pred_wavs[i]  # [channels, samples]
+                peak = sample.abs().max().item()
+                if peak > 1e-8:
+                    gain = target_peak / peak
+                    pred_wavs[i] = sample * gain
+                    logger.info(f"[generate_music] Audio {i}: raw peak={peak:.6f}, "
+                                f"gain={gain:.2f}x, normalized peak={target_peak:.3f} "
+                                f"({TARGET_PEAK_DB} dBFS)")
+                else:
+                    logger.warning(f"[generate_music] Audio {i}: near-silent "
+                                   f"(peak={peak:.8f}), skipping normalization")
+            # ── End peak normalization ──────────────────────────────────
+
             logger.info("[generate_music] VAE decode completed. Preparing audio tensors...")
             if progress:
                 progress(0.99, desc="Preparing audio data...")
