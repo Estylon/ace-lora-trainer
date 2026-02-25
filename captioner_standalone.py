@@ -26,6 +26,38 @@ import csv
 import torch
 
 
+def _detect_best_attn_implementation() -> str:
+    """Detect the best available attention implementation.
+
+    Returns:
+        "flash_attention_2" if available, "sdpa" as fallback, "eager" as last resort.
+    """
+    try:
+        import flash_attn  # noqa: F401
+        return "flash_attention_2"
+    except ImportError:
+        pass
+    # PyTorch >= 2.0 has SDPA built-in (scaled_dot_product_attention)
+    if hasattr(torch.nn.functional, "scaled_dot_product_attention"):
+        return "sdpa"
+    return "eager"
+
+
+def _detect_best_dtype() -> torch.dtype:
+    """Detect the best dtype for the current GPU.
+
+    Returns:
+        torch.bfloat16 for Ampere+ (SM>=80), torch.float16 for older GPUs, torch.float32 for CPU.
+    """
+    if torch.cuda.is_available():
+        capability = torch.cuda.get_device_capability()
+        if capability[0] >= 8:
+            return torch.bfloat16
+        else:
+            return torch.float16
+    return torch.float32
+
+
 class AceStepCaptioner:
     """Handler per il modello ACE-Step Captioner basato su Qwen2.5 Omni."""
 
@@ -81,22 +113,32 @@ class AceStepCaptioner:
             if progress_callback:
                 progress_callback(3, "Loading model (this may take a while)...")
 
-            # Determine dtype
-            dtype = torch.bfloat16 if self._resolved_device == "cuda" else torch.float32
+            # Determine dtype: bf16 for Ampere+, fp16 for older GPUs
+            dtype = _detect_best_dtype() if self._resolved_device == "cuda" else torch.float32
+
+            # Detect best attention implementation
+            attn_impl = _detect_best_attn_implementation() if self._resolved_device == "cuda" else "eager"
+
+            load_kwargs = dict(
+                dtype=dtype,
+                device_map="auto",
+                enable_audio_output=False,
+            )
+            if attn_impl != "eager":
+                load_kwargs["attn_implementation"] = attn_impl
 
             # Load model - disable audio output (talker) to save ~2GB VRAM
             self.model = Qwen2_5OmniForConditionalGeneration.from_pretrained(
                 self.model_path,
-                dtype=dtype,
-                device_map="auto",
-                enable_audio_output=False,
+                **load_kwargs,
             )
             self.model.eval()
 
             if progress_callback:
                 progress_callback(4, "Model loaded successfully!")
 
-            return f"✅ Captioner loaded on {self._resolved_device}"
+            dtype_name = str(dtype).replace("torch.", "")
+            return f"✅ Captioner loaded on {self._resolved_device} ({dtype_name}, attn={attn_impl})"
 
         except Exception as e:
             return f"❌ Failed to load model: {str(e)}"
@@ -473,7 +515,7 @@ class AceStepCaptioner:
 
         return metadata
 
-    def transcribe_lyrics(self, audio_path: str, max_new_tokens: int = 1024, language: str = "auto", audio_array=None) -> tuple:
+    def transcribe_lyrics(self, audio_path: str, max_new_tokens: int = 512, language: str = "auto", audio_array=None) -> tuple:
         """
         Transcribe lyrics using ACE-Step Transcriber.
         Produces structured lyrics with section tags ([Verse], [Chorus], etc.)
@@ -501,8 +543,13 @@ class AceStepCaptioner:
                     return "❌ librosa not installed. Run: pip install librosa", "unknown"
                 audio_array, sr = librosa.load(audio_path, sr=16000, mono=True)
 
-            print(f"  [Transcriber] Processing {Path(audio_path).name} ({len(audio_array)/sr:.1f}s)...")
+            import time as _time
+            audio_dur = len(audio_array) / 16000
+            print(f"  [Transcriber] Processing {Path(audio_path).name} ({audio_dur:.1f}s)...")
+            t0 = _time.perf_counter()
             raw_output = self._transcriber_inference(audio_array, max_new_tokens=max_new_tokens)
+            elapsed = _time.perf_counter() - t0
+            print(f"  [Transcriber] Inference: {elapsed:.1f}s (ratio: {elapsed/audio_dur:.2f}x realtime)")
             print(f"  [Transcriber] Raw output ({len(raw_output)} chars):\n    {raw_output[:500]}")
 
             lyrics, detected_lang = self._parse_transcriber_output(raw_output)
@@ -600,24 +647,34 @@ class AceStepCaptioner:
             from transformers import Qwen2_5OmniForConditionalGeneration, Qwen2_5OmniProcessor
 
             device = self._resolved_device or ("cuda" if torch.cuda.is_available() else "cpu")
-            dtype = torch.bfloat16 if device == "cuda" else torch.float32
+            dtype = _detect_best_dtype() if device == "cuda" else torch.float32
+            attn_impl = _detect_best_attn_implementation() if device == "cuda" else "eager"
 
             print(f"  [Transcriber] Loading from {transcriber_path}...")
+            print(f"  [Transcriber] dtype={dtype}, attn={attn_impl}")
             self.transcriber_processor = Qwen2_5OmniProcessor.from_pretrained(transcriber_path)
-            self.transcriber_model = Qwen2_5OmniForConditionalGeneration.from_pretrained(
-                transcriber_path,
+
+            load_kwargs = dict(
                 dtype=dtype,
                 device_map="auto",
                 enable_audio_output=False,
             )
+            if attn_impl != "eager":
+                load_kwargs["attn_implementation"] = attn_impl
+
+            self.transcriber_model = Qwen2_5OmniForConditionalGeneration.from_pretrained(
+                transcriber_path,
+                **load_kwargs,
+            )
             self.transcriber_model.eval()
             self.transcriber_path = transcriber_path
 
-            return f"✅ Transcriber loaded on {device}"
+            dtype_name = str(dtype).replace("torch.", "")
+            return f"✅ Transcriber loaded on {device} ({dtype_name}, attn={attn_impl})"
         except Exception as e:
             return f"❌ Failed to load Transcriber: {str(e)}"
 
-    def _transcriber_inference(self, audio_array, max_new_tokens: int = 1024) -> str:
+    def _transcriber_inference(self, audio_array, max_new_tokens: int = 512) -> str:
         """
         Run ACE-Step Transcriber on pre-loaded audio.
 
@@ -868,6 +925,124 @@ def load_captioner_config(config_path: str):
     return (f"✅ Config loaded: {in_path}", *updates)
 
 
+# ============== GPU Monitor ==============
+
+def get_vram_info() -> dict:
+    """Get current VRAM usage info. Returns dict with total, used, free in GB."""
+    try:
+        if not torch.cuda.is_available():
+            return {"available": False, "error": "CUDA not available"}
+
+        gpu_name = torch.cuda.get_device_name(0)
+        total = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+        reserved = torch.cuda.memory_reserved(0) / (1024**3)
+        allocated = torch.cuda.memory_allocated(0) / (1024**3)
+
+        # Use nvidia-smi for accurate system-wide VRAM usage
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["nvidia-smi", "--query-gpu=memory.used,memory.free,memory.total",
+                 "--format=csv,noheader,nounits", "-i", "0"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0:
+                parts = result.stdout.strip().split(",")
+                smi_used = float(parts[0].strip()) / 1024
+                smi_free = float(parts[1].strip()) / 1024
+                smi_total = float(parts[2].strip()) / 1024
+                return {
+                    "available": True,
+                    "gpu_name": gpu_name,
+                    "total_gb": round(smi_total, 1),
+                    "used_gb": round(smi_used, 1),
+                    "free_gb": round(smi_free, 1),
+                    "torch_allocated_gb": round(allocated, 1),
+                    "torch_reserved_gb": round(reserved, 1),
+                }
+        except Exception:
+            pass
+
+        # Fallback to torch-only info
+        free_approx = total - reserved
+        return {
+            "available": True,
+            "gpu_name": gpu_name,
+            "total_gb": round(total, 1),
+            "used_gb": round(reserved, 1),
+            "free_gb": round(free_approx, 1),
+            "torch_allocated_gb": round(allocated, 1),
+            "torch_reserved_gb": round(reserved, 1),
+        }
+    except Exception as e:
+        return {"available": False, "error": str(e)}
+
+
+def get_other_gpu_processes() -> list:
+    """Get list of OTHER processes using the GPU (not this Python process)."""
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["nvidia-smi", "--query-compute-apps=pid,name,used_memory",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode != 0:
+            return []
+
+        current_pid = os.getpid()
+        processes = []
+        for line in result.stdout.strip().split("\n"):
+            if not line.strip():
+                continue
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) >= 3:
+                pid = int(parts[0])
+                name = parts[1]
+                mem_mb = float(parts[2]) if parts[2].strip() else 0
+                if pid != current_pid:
+                    processes.append({
+                        "pid": pid,
+                        "name": os.path.basename(name),
+                        "mem_gb": round(mem_mb / 1024, 1),
+                    })
+        return processes
+    except Exception:
+        return []
+
+
+def format_vram_status() -> str:
+    """Format a human-readable VRAM status string for the UI."""
+    info = get_vram_info()
+    if not info.get("available"):
+        return f"⚠️ GPU: {info.get('error', 'Unknown error')}"
+
+    used_pct = (info['used_gb'] / info['total_gb'] * 100) if info['total_gb'] > 0 else 0
+
+    if info['free_gb'] >= 16:
+        icon = "🟢"
+    elif info['free_gb'] >= 8:
+        icon = "🟡"
+    else:
+        icon = "🔴"
+
+    lines = [
+        f"{icon} {info['gpu_name']}",
+        f"   VRAM: {info['used_gb']:.1f} / {info['total_gb']:.1f} GB used ({used_pct:.0f}%) — {info['free_gb']:.1f} GB free",
+    ]
+
+    if info['torch_allocated_gb'] > 0:
+        lines.append(f"   PyTorch: {info['torch_allocated_gb']:.1f} GB allocated, {info['torch_reserved_gb']:.1f} GB reserved")
+
+    other_procs = get_other_gpu_processes()
+    if other_procs:
+        lines.append(f"   ⚠️ Other processes using GPU:")
+        for p in other_procs:
+            lines.append(f"      • {p['name']} (PID {p['pid']}) — {p['mem_gb']:.1f} GB")
+
+    return "\n".join(lines)
+
+
 # ============== Gradio UI ==============
 
 def open_folder_picker() -> str:
@@ -1032,22 +1207,30 @@ def start_captioning_ui(input_dir, activation_tag, generate_lyrics, save_csv, cs
     """
     global _ui_captioner, _ui_results
 
+    print(f"[CAPTIONER DEBUG] start_captioning_ui called")
+    print(f"  input_dir={input_dir!r}, tag={activation_tag!r}, lyrics={generate_lyrics}, csv={save_csv}, max_tokens={max_tokens}")
+
     # Failsafe: activation tag is mandatory
     tag = activation_tag.strip() if activation_tag else ""
     if not tag:
+        print("[CAPTIONER DEBUG] BLOCKED: activation tag empty")
         return "❌ Activation Tag is empty! Set a unique trigger word (e.g., LNKPRK_style) before captioning.", [], 0
 
     if _ui_captioner is None or _ui_captioner.model is None:
+        print("[CAPTIONER DEBUG] BLOCKED: model not loaded")
         return "❌ Load Captioner model first", [], 0
 
     if generate_lyrics and _ui_captioner.transcriber_model is None:
+        print("[CAPTIONER DEBUG] BLOCKED: transcriber not loaded but lyrics requested")
         return "❌ Load Transcriber model first (needed for lyrics generation). Tip: you can run without lyrics first, then load transcriber and re-run with lyrics enabled.", [], 0
 
     if not input_dir or not input_dir.strip():
+        print("[CAPTIONER DEBUG] BLOCKED: no input dir")
         return "❌ Please select an input directory", [], 0
 
     input_dir = input_dir.strip()
     if not os.path.exists(input_dir):
+        print(f"[CAPTIONER DEBUG] BLOCKED: dir not found: {input_dir}")
         return f"❌ Directory not found: {input_dir}", [], 0
 
     audio_extensions = {'.mp3', '.wav', '.flac', '.ogg', '.m4a', '.aac', '.wma'}
@@ -1109,10 +1292,13 @@ def start_captioning_ui(input_dir, activation_tag, generate_lyrics, save_csv, cs
 
             # Step 1: Combined caption + metadata (single inference)
             current_step += 1
+            audio_dur = len(audio_array) / sr
             if progress:
                 step_label = f"[{i+1}/{len(audio_files)}] Caption+Metadata: {audio_path.name}"
                 progress(current_step / total_steps, desc=step_label)
 
+            import time as _time
+            t0 = _time.perf_counter()
             try:
                 combined = _ui_captioner.caption_and_analyze(
                     audio_array, sr=sr, max_new_tokens=max_tokens + 100,
@@ -1120,8 +1306,10 @@ def start_captioning_ui(input_dir, activation_tag, generate_lyrics, save_csv, cs
                 caption = combined["caption"]
             except Exception as e:
                 caption = f"Error: {e}"
-                combined = {"caption": caption, "bpm": None, "duration": int(len(audio_array) / sr),
+                combined = {"caption": caption, "bpm": None, "duration": int(audio_dur),
                             "keyscale": "", "timesignature": "4", "genre": ""}
+            cap_time = _time.perf_counter() - t0
+            print(f"  [{i+1}/{len(audio_files)}] {audio_path.name} — caption: {cap_time:.1f}s ({audio_dur:.0f}s audio)")
 
             result = {
                 "filename": audio_path.name,
@@ -1151,7 +1339,7 @@ def start_captioning_ui(input_dir, activation_tag, generate_lyrics, save_csv, cs
                     step_label = f"[{i+1}/{len(audio_files)}] Transcribing lyrics: {audio_path.name}"
                     progress(current_step / total_steps, desc=step_label)
 
-                lyrics, detected_lang = _ui_captioner.transcribe_lyrics(str(audio_path), max_new_tokens=1024, audio_array=audio_array)
+                lyrics, detected_lang = _ui_captioner.transcribe_lyrics(str(audio_path), max_new_tokens=512, audio_array=audio_array)
                 result["lyrics"] = lyrics
                 result["language"] = detected_lang
                 result["is_instrumental"] = (lyrics.strip() == "[Instrumental]")
@@ -1265,7 +1453,7 @@ def transcribe_only_ui(input_dir, activation_tag, progress=None):
         result.setdefault("caption", "")
 
         # Transcribe lyrics
-        lyrics, detected_lang = _ui_captioner.transcribe_lyrics(str(audio_path), max_new_tokens=1024)
+        lyrics, detected_lang = _ui_captioner.transcribe_lyrics(str(audio_path), max_new_tokens=512)
         result["lyrics"] = lyrics
         result["language"] = detected_lang
         result["is_instrumental"] = (lyrics.strip() == "[Instrumental]")
@@ -1398,6 +1586,11 @@ def create_captioner_ui():
             <p>Generate detailed music descriptions • JSON output compatible with LoRA Training UI</p>
         </div>
         """)
+
+        # ==================== GPU MONITOR ====================
+        with gr.Row():
+            gpu_status = gr.Textbox(label="🎮 GPU Status", interactive=False, lines=3, scale=4)
+            gpu_refresh_btn = gr.Button("🔄", scale=0, min_width=45, variant="secondary")
 
         # ==================== CONFIG ====================
         with gr.Accordion("💾 Config (Save / Load Settings)", open=False):
@@ -1553,6 +1746,9 @@ def create_captioner_ui():
 
         # ==================== EVENT HANDLERS ====================
 
+        # GPU monitor
+        gpu_refresh_btn.click(fn=format_vram_status, outputs=[gpu_status])
+
         # Folder pickers
         model_path_picker.click(fn=open_folder_picker, outputs=[model_path_input])
         transcriber_path_picker.click(fn=open_folder_picker, outputs=[transcriber_path_input])
@@ -1586,13 +1782,17 @@ def create_captioner_ui():
             outputs=[config_status] + _config_components,
         )
 
-        # Captioner Model
-        load_btn.click(fn=load_model_ui, inputs=[model_path_input], outputs=[model_status])
-        unload_btn.click(fn=unload_model_ui, outputs=[model_status])
+        # Captioner Model (refresh GPU status after load/unload)
+        load_btn.click(fn=load_model_ui, inputs=[model_path_input], outputs=[model_status]).then(
+            fn=format_vram_status, outputs=[gpu_status])
+        unload_btn.click(fn=unload_model_ui, outputs=[model_status]).then(
+            fn=format_vram_status, outputs=[gpu_status])
 
-        # Transcriber Model
-        load_transcriber_btn.click(fn=load_transcriber_ui, inputs=[transcriber_path_input, model_path_input], outputs=[transcriber_status])
-        unload_transcriber_btn.click(fn=unload_transcriber_ui, outputs=[transcriber_status])
+        # Transcriber Model (refresh GPU status after load/unload)
+        load_transcriber_btn.click(fn=load_transcriber_ui, inputs=[transcriber_path_input, model_path_input], outputs=[transcriber_status]).then(
+            fn=format_vram_status, outputs=[gpu_status])
+        unload_transcriber_btn.click(fn=unload_transcriber_ui, outputs=[transcriber_status]).then(
+            fn=format_vram_status, outputs=[gpu_status])
 
         # Split
         split_btn.click(
@@ -1630,11 +1830,20 @@ def create_captioner_ui():
         )
 
         # Auto-load config on startup if file exists
+        def _auto_load_config(config_path):
+            """Silently load config on startup; skip if file doesn't exist."""
+            path = (config_path or "").strip()
+            if not path or not os.path.isfile(path):
+                import gradio as gr
+                return ("", *[gr.update() for _ in CAPTIONER_CONFIG_KEYS])
+            return load_captioner_config(path)
+
         demo.load(
-            fn=load_captioner_config,
+            fn=_auto_load_config,
             inputs=[config_path_input],
             outputs=[config_status] + _config_components,
         )
+        demo.load(fn=format_vram_status, outputs=[gpu_status])
 
     return demo
 
