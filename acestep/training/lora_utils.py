@@ -255,17 +255,13 @@ def inject_lora_into_dit(
 
     # Resolve target modules based on attention type
     if train_mlp:
-        # Clone target modules to avoid mutating the original config
+        # Update target modules in the config to ensure they are persisted in metadata
         mlp_targets = ["gate_proj", "up_proj", "down_proj"]
-        original_targets = list(lora_config.target_modules)
         for target in mlp_targets:
-            if target not in original_targets:
-                original_targets.append(target)
+            if target not in lora_config.target_modules:
+                lora_config.target_modules.append(target)
         
-        # Temporarily override target_modules for resolution
-        from dataclasses import replace
-        modified_lora_config = replace(lora_config, target_modules=original_targets)
-        resolved_targets = resolve_target_modules(model, modified_lora_config, attention_type)
+        resolved_targets = resolve_target_modules(model, lora_config, attention_type)
         
         # If filtering by attention, we MUST manually re-add the MLP modules
         # because resolve_target_modules filters by "self_attn" or "cross_attn".

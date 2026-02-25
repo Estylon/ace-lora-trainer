@@ -115,6 +115,15 @@ def inject_lokr_into_dit(
 
     # Build target module regex for LyCORIS
     target_modules = lokr_config.target_modules
+    
+    # Sync target_modules metadata if MLP training is requested
+    if train_mlp:
+        mlp_projs = ["gate_proj", "up_proj", "down_proj"]
+        for proj in mlp_projs:
+            if proj not in target_modules:
+                target_modules.append(proj)
+        logger.info(f"Expanded LoKr target_modules metadata to include MLP: {target_modules}")
+
     target_regex = _build_target_regex(target_modules, attention_type, train_mlp=train_mlp)
 
     logger.info(f"LoKr target pattern: {target_regex}")
