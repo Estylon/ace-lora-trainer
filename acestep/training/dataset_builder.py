@@ -1095,6 +1095,7 @@ class DatasetBuilder:
         max_duration: float = 240.0,
         progress_callback=None,
         audio_normalization: str = "none",
+        train_cot: bool = False,
     ) -> Tuple[List[str], str]:
         """Preprocess all labeled samples to tensor files for efficient training.
         
@@ -1279,22 +1280,41 @@ class DatasetBuilder:
                 
                 # Step 8: Build context_latents for text2music
                 # For text2music: src_latents = silence_latent, is_covers = 0
-                # chunk_masks: 1 = generate, 0 = keep original
-                # IMPORTANT: chunk_masks must have same shape as src_latents [B, T, 64]
-                # For text2music, we want to generate the entire audio, so chunk_masks = all 1s
-                src_latents = silence_latent[:, :latent_length, :].to(dtype)
-                if src_latents.shape[0] < 1:
-                    src_latents = src_latents.expand(1, -1, -1)
+                # If train_cot is enabled, we use the audio's own semantic tokens as hints
+                # to train the model's ability to "detail" semantic codes.
+                if train_cot:
+                    with torch.no_grad():
+                        # tokenize takes [B, T, 64] latents, silence_latent, and attention_mask [B, T]
+                        # target_latents is already [1, T, 64]
+                        lm_hints_5Hz, _, _ = model.tokenize(
+                            target_latents, 
+                            silence_latent, 
+                            attention_mask.bool()
+                        )
+                        src_latents = model.detokenize(lm_hints_5Hz)
+                        # Crop/Pad to match latent_length (tokenize may have added pooling padding)
+                        if src_latents.shape[1] < latent_length:
+                            pad_len = latent_length - src_latents.shape[1]
+                            src_latents = torch.cat([
+                                src_latents,
+                                silence_latent[:, :pad_len, :].expand(1, -1, -1).to(dtype)
+                            ], dim=1)
+                        elif src_latents.shape[1] > latent_length:
+                            src_latents = src_latents[:, :latent_length, :]
+                else:
+                    src_latents = silence_latent[:, :latent_length, :].to(dtype)
+                    if src_latents.shape[0] < 1:
+                        src_latents = src_latents.expand(1, -1, -1)
                 
-                # Pad or truncate silence_latent to match latent_length
-                if src_latents.shape[1] < latent_length:
-                    pad_len = latent_length - src_latents.shape[1]
-                    src_latents = torch.cat([
-                        src_latents,
-                        silence_latent[:, :pad_len, :].expand(1, -1, -1).to(dtype)
-                    ], dim=1)
-                elif src_latents.shape[1] > latent_length:
-                    src_latents = src_latents[:, :latent_length, :]
+                    # Pad or truncate silence_latent to match latent_length
+                    if src_latents.shape[1] < latent_length:
+                        pad_len = latent_length - src_latents.shape[1]
+                        src_latents = torch.cat([
+                            src_latents,
+                            silence_latent[:, :pad_len, :].expand(1, -1, -1).to(dtype)
+                        ], dim=1)
+                    elif src_latents.shape[1] > latent_length:
+                        src_latents = src_latents[:, :latent_length, :]
                 
                 # chunk_masks = 1 means "generate this region", 0 = keep original
                 # Shape must match src_latents: [B, T, 64] (NOT [B, T, 1])
@@ -1381,6 +1401,7 @@ class DatasetBuilder:
                 "target_sample_rate": target_sample_rate,
                 "genre_ratio": genre_ratio,
                 "audio_normalization": audio_normalization,
+                "train_cot": train_cot,
             },
         }
         manifest_path = os.path.join(output_dir, "manifest.json")
@@ -1400,6 +1421,7 @@ class DatasetBuilder:
         max_duration: float = 240.0,
         progress_callback=None,
         audio_normalization: str = "none",
+        train_cot: bool = False,
     ) -> Tuple[List[str], str]:
         """Two-pass preprocessing for low-VRAM GPUs (8-12GB).
 
@@ -1533,14 +1555,28 @@ class DatasetBuilder:
                     lyric_hidden_states = text_encoder.embed_tokens(lyric_input_ids).to(dtype)
 
                 # Build context_latents
-                src_latents = silence_latent[:, :latent_length, :].to(dtype)
-                if src_latents.shape[0] < 1:
-                    src_latents = src_latents.expand(1, -1, -1)
-                if src_latents.shape[1] < latent_length:
-                    pad_len = latent_length - src_latents.shape[1]
-                    src_latents = torch.cat([src_latents, silence_latent[:, :pad_len, :].expand(1, -1, -1).to(dtype)], dim=1)
-                elif src_latents.shape[1] > latent_length:
-                    src_latents = src_latents[:, :latent_length, :]
+                if train_cot:
+                    with torch.no_grad():
+                        lm_hints_5Hz, _, _ = model.tokenize(
+                            target_latents,
+                            silence_latent,
+                            attention_mask.bool()
+                        )
+                        src_latents = model.detokenize(lm_hints_5Hz)
+                        if src_latents.shape[1] < latent_length:
+                            pad_len = latent_length - src_latents.shape[1]
+                            src_latents = torch.cat([src_latents, silence_latent[:, :pad_len, :].expand(1, -1, -1).to(dtype)], dim=1)
+                        elif src_latents.shape[1] > latent_length:
+                            src_latents = src_latents[:, :latent_length, :]
+                else:
+                    src_latents = silence_latent[:, :latent_length, :].to(dtype)
+                    if src_latents.shape[0] < 1:
+                        src_latents = src_latents.expand(1, -1, -1)
+                    if src_latents.shape[1] < latent_length:
+                        pad_len = latent_length - src_latents.shape[1]
+                        src_latents = torch.cat([src_latents, silence_latent[:, :pad_len, :].expand(1, -1, -1).to(dtype)], dim=1)
+                    elif src_latents.shape[1] > latent_length:
+                        src_latents = src_latents[:, :latent_length, :]
                 chunk_masks = torch.ones(1, latent_length, 64, device=device, dtype=dtype)
                 context_latents = torch.cat([src_latents, chunk_masks], dim=-1)
 
@@ -1701,6 +1737,7 @@ class DatasetBuilder:
                 "target_sample_rate": target_sample_rate,
                 "genre_ratio": self.metadata.genre_ratio,
                 "audio_normalization": audio_normalization,
+                "train_cot": train_cot,
                 "mode": "two_pass",
             },
         }
