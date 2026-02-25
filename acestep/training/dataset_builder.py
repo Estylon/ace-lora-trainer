@@ -629,9 +629,15 @@ class DatasetBuilder:
         # Check if sample has pre-loaded lyrics from .txt file
         has_preloaded_lyrics = sample.has_raw_lyrics() and not sample.is_instrumental
 
-        # Remember if sample has pre-existing metadata from CSV (don't overwrite)
-        has_csv_bpm = sample.bpm is not None
-        has_csv_key = bool(sample.keyscale)
+        # Remember pre-existing metadata (from JSON captioner, CSV, or manual edit).
+        # Auto-labeling will only fill in MISSING fields, preserving what's already there.
+        has_caption = bool(sample.caption)
+        has_genre = bool(sample.genre)
+        has_bpm = sample.bpm is not None
+        has_key = bool(sample.keyscale)
+        has_timesig = bool(sample.timesignature)
+        has_language = bool(sample.language) and sample.language != "unknown"
+        has_lyrics = bool(sample.lyrics) and sample.lyrics not in ("", "[Instrumental]")
 
         try:
             if progress_callback:
@@ -663,17 +669,21 @@ class DatasetBuilder:
                 if not result.success:
                     return sample, f"❌ LLM format failed: {result.error}"
 
-                # Update sample with formatted results (preserve CSV metadata)
-                sample.caption = result.caption or ""
+                # Update sample — only fill in MISSING fields
+                if not has_caption:
+                    sample.caption = result.caption or ""
                 if not skip_metas:
-                    if not has_csv_bpm:
+                    if not has_bpm:
                         sample.bpm = result.bpm
-                    if not has_csv_key:
+                    if not has_key:
                         sample.keyscale = result.keyscale or ""
-                    sample.timesignature = result.timesignature or ""
-                sample.language = result.language or "unknown"
+                    if not has_timesig:
+                        sample.timesignature = result.timesignature or ""
+                if not has_language:
+                    sample.language = result.language or "unknown"
                 sample.formatted_lyrics = result.lyrics or ""
-                sample.lyrics = sample.formatted_lyrics if sample.formatted_lyrics else sample.raw_lyrics
+                if not has_lyrics:
+                    sample.lyrics = sample.formatted_lyrics if sample.formatted_lyrics else sample.raw_lyrics
 
                 status_suffix = "(lyrics formatted by LM)"
 
@@ -688,19 +698,23 @@ class DatasetBuilder:
                 if not metadata:
                     return sample, f"❌ LLM labeling failed: {status}"
 
-                # Update sample with generated caption and genre (always)
-                sample.caption = metadata.get('caption', '')
-                sample.genre = metadata.get('genres', '')  # Extract genre from LLM output
+                # Update sample — only fill in MISSING fields
+                if not has_caption:
+                    sample.caption = metadata.get('caption', '')
+                if not has_genre:
+                    sample.genre = metadata.get('genres', '')
 
-                # Update metas only if not skipped and not from CSV
+                # Update metas only if not skipped and not already present
                 if not skip_metas:
-                    if not has_csv_bpm:
+                    if not has_bpm:
                         sample.bpm = self._parse_int(metadata.get('bpm'))
-                    if not has_csv_key:
+                    if not has_key:
                         sample.keyscale = metadata.get('keyscale', '')
-                    sample.timesignature = metadata.get('timesignature', '')
+                    if not has_timesig:
+                        sample.timesignature = metadata.get('timesignature', '')
 
-                sample.language = metadata.get('vocal_language', 'unknown')
+                if not has_language:
+                    sample.language = metadata.get('vocal_language', 'unknown')
 
                 # LLM-generated/transcribed lyrics
                 llm_lyrics = metadata.get('lyrics', '')
@@ -712,10 +726,13 @@ class DatasetBuilder:
                     sample.formatted_lyrics = ""
                     status_suffix = "(instrumental)"
                 elif transcribe_lyrics:
-                    # Transcribe mode: Use LLM-generated lyrics, ignore user's .txt file
+                    # Transcribe mode: explicit user override — always use LLM lyrics
                     sample.formatted_lyrics = llm_lyrics
                     sample.lyrics = llm_lyrics
                     status_suffix = "(lyrics transcribed by LM)"
+                elif has_lyrics:
+                    # Lyrics already present (from captioner JSON, .txt file, or manual edit) — keep them
+                    status_suffix = "(using existing lyrics)"
                 elif has_preloaded_lyrics:
                     # Keep raw lyrics from .txt file
                     sample.lyrics = sample.raw_lyrics
@@ -737,7 +754,20 @@ class DatasetBuilder:
             sample.labeled = True
             self.samples[sample_idx] = sample
 
+            # Report which fields were filled vs preserved
+            filled = []
+            kept = []
+            for field, had in [("caption", has_caption), ("genre", has_genre),
+                               ("bpm", has_bpm), ("key", has_key),
+                               ("timesig", has_timesig), ("language", has_language)]:
+                if had:
+                    kept.append(field)
+                else:
+                    filled.append(field)
+
             status_msg = f"✅ Labeled: {sample.filename}"
+            if kept:
+                status_msg += f" [kept: {', '.join(kept)}]"
             if skip_metas:
                 status_msg += " (skip metas)"
             if language_hint and not sample.is_instrumental:
