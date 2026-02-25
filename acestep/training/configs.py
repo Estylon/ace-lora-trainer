@@ -250,6 +250,10 @@ class TrainingConfig:
     # Default 1500 matches ACE-Step's standard 60s inference length.
     max_latent_length: int = 1500
 
+    # CoT training: use semantic audio codes as conditioning hints.
+    # Requires running audio tokenizer during preprocessing.
+    train_cot: bool = False
+
     # Data loading (num_workers=0 on Windows avoids spawn overhead for small .pt files)
     num_workers: int = 0
     pin_memory: bool = True
@@ -375,6 +379,7 @@ class TrainingConfig:
             "snr_gamma": self.snr_gamma,
             "nan_detection_max": self.nan_detection_max,
             "audio_normalization": self.audio_normalization,
+            "train_cot": self.train_cot,
         }
 
 

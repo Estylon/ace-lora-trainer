@@ -807,6 +807,7 @@ def preprocess_dataset(
     output_dir: str, max_duration: float,
     custom_tag: str, tag_position: str,
     audio_norm_mode: str,
+    train_cot: bool,
     builder_state, progress=gr.Progress(),
 ) -> Tuple[str, str]:
     """Preprocess dataset to tensors.
@@ -876,6 +877,7 @@ def preprocess_dataset(
         max_duration=max_duration,
         progress_callback=progress_callback,
         audio_normalization=norm_mode,
+        train_cot=train_cot,
     )
 
     workflow_state["tensors_ready"] = len(output_paths) > 0
@@ -1144,6 +1146,7 @@ def start_training(
     sample_strengths_val, sample_inf_steps_val, sample_guidance_val, sample_shift_val,
     sample_seed_val,
     loss_weighting_val, snr_gamma_val, nan_detection_max_val,
+    train_cot_val,
     training_state,
     progress=gr.Progress(),
 ):
@@ -1263,6 +1266,7 @@ def start_training(
             loss_weighting=str(loss_weighting_val) if loss_weighting_val else "none",
             snr_gamma=float(snr_gamma_val) if snr_gamma_val else 5.0,
             nan_detection_max=int(nan_detection_max_val) if nan_detection_max_val else 10,
+            train_cot=bool(train_cot_val),
         )
 
         log_lines = []
@@ -2213,6 +2217,12 @@ def create_ui():
                     info="Normalize audio loudness before encoding. 'peak'=-1dBFS, 'lufs'=-14 LUFS, 'peak_lufs'=both",
                     scale=2,
                 )
+                train_cot_preprocessing = gr.Checkbox(
+                    label="Train with CoT (Semantic Hints)",
+                    value=False,
+                    info="Use audio semantic tokens as conditioning hints. Matches CoT-enabled inference.",
+                    scale=2,
+                )
 
             preprocess_btn = gr.Button("⚡ Start Preprocessing", variant="primary", size="lg", elem_classes="primary-action")
             preprocess_progress = gr.Textbox(label="Progress", interactive=False, lines=3)
@@ -2362,6 +2372,7 @@ def create_ui():
                     with gr.Row(elem_classes="compact-row"):
                         gradient_checkpointing_enabled = gr.Checkbox(label="Gradient Checkpointing", value=False, info="Save ~40-60% VRAM at ~30% speed cost. Recommended for ≤16GB VRAM.")
                         encoder_offloading_enabled = gr.Checkbox(label="Encoder Offloading", value=False, info="Move encoder to CPU during training. Saves ~2-4 GB VRAM.")
+                        train_cot_enabled = gr.Checkbox(label="Enable CoT Training Mode", value=False, info="Log CoT training state. Note: Actual data depends on Preprocessing settings.")
 
                     torch_compile_enabled = gr.Checkbox(label="torch.compile (Experimental)", value=False, info="JIT-compile decoder. Off by default — slow first epoch. Only enable for large datasets on Linux.")
 
@@ -2659,7 +2670,7 @@ def create_ui():
         # Preprocessing (custom_tag + tag_position read directly from UI for failsafe)
         preprocess_btn.click(
             fn=preprocess_dataset,
-            inputs=[preprocess_output_dir, max_duration_slider, custom_tag, tag_position, audio_norm_dropdown, dataset_builder_state],
+            inputs=[preprocess_output_dir, max_duration_slider, custom_tag, tag_position, audio_norm_dropdown, train_cot_preprocessing, dataset_builder_state],
             outputs=[preprocess_progress, status_bar],
         )
 
@@ -2752,6 +2763,7 @@ def create_ui():
                 sample_strengths, sample_inf_steps, sample_guidance, sample_shift,
                 sample_seed,
                 loss_weighting, snr_gamma, nan_detection_max,
+                train_cot_enabled,
                 training_state,
             ],
             outputs=[training_progress, training_log, training_loss_plot, training_state, status_bar],
@@ -2848,6 +2860,8 @@ PROFILE_KEYS = [
     "sample_seed",
     "loss_weighting",
     "snr_gamma",
+    "train_cot_preprocessing",
+    "train_cot_enabled",
     "nan_detection_max",
     "audio_norm_dropdown",
     "resume_enabled",
