@@ -360,6 +360,7 @@ class PreprocessedLoRAModule(nn.Module):
 
         # Inject adapter into the decoder
         attention_type = getattr(training_config, 'attention_type', 'both')
+        train_mlp = getattr(training_config, 'train_mlp', False)
 
         if adapter_type == "lokr":
             if not LOKR_IMPORTS_OK or not check_lycoris_available():
@@ -370,12 +371,12 @@ class PreprocessedLoRAModule(nn.Module):
             if lokr_config is None:
                 raise ValueError("lokr_config is required when adapter_type='lokr'")
             self.model, self.lycoris_net, self.lora_info = inject_lokr_into_dit(
-                model, lokr_config, attention_type=attention_type,
+                model, lokr_config, attention_type=attention_type, train_mlp=train_mlp
             )
-            logger.info(f"LoKr injected: {self.lora_info['trainable_params']:,} trainable params (attention: {attention_type})")
+            logger.info(f"LoKr injected: {self.lora_info['trainable_params']:,} trainable params (attention: {attention_type}, mlp: {train_mlp})")
         elif check_peft_available():
-            self.model, self.lora_info = inject_lora_into_dit(model, lora_config, attention_type=attention_type)
-            logger.info(f"LoRA injected: {self.lora_info['trainable_params']:,} trainable params (attention: {attention_type})")
+            self.model, self.lora_info = inject_lora_into_dit(model, lora_config, attention_type=attention_type, train_mlp=train_mlp)
+            logger.info(f"LoRA injected: {self.lora_info['trainable_params']:,} trainable params (attention: {attention_type}, mlp: {train_mlp})")
         else:
             self.model = model
             self.lora_info = {}

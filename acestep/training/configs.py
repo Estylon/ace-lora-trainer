@@ -215,6 +215,11 @@ class TrainingConfig:
     seed: int = 42
     output_dir: str = "./lora_output"
 
+    # MLP targeting: "true" (default) or "false"
+    # When enabled, targets MLP modules (gate_proj, up_proj, down_proj) in addition to attention.
+    # Significantly increases parameters and quality, but uses more VRAM.
+    train_mlp: bool = False
+
     # Optimizer: "adamw" (default), "adamw8bit" (bitsandbytes), "adafactor", "prodigy"
     optimizer_type: str = "adamw"
 
@@ -375,6 +380,7 @@ class TrainingConfig:
             "snr_gamma": self.snr_gamma,
             "nan_detection_max": self.nan_detection_max,
             "audio_normalization": self.audio_normalization,
+            "train_mlp": self.train_mlp,
         }
 
 

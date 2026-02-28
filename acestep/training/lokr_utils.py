@@ -30,7 +30,7 @@ def check_lycoris_available() -> bool:
     return LYCORIS_AVAILABLE
 
 
-def _build_target_regex(target_modules: List[str], attention_type: str = "both") -> str:
+def _build_target_regex(target_modules: List[str], attention_type: str = "both", train_mlp: bool = False) -> str:
     """Build a regex pattern for LyCORIS apply_preset from target module names.
 
     LyCORIS uses regex-based target matching via apply_preset(), unlike PEFT
@@ -39,28 +39,40 @@ def _build_target_regex(target_modules: List[str], attention_type: str = "both")
     Args:
         target_modules: List of module short names (e.g. ["q_proj", "k_proj", "v_proj", "o_proj"])
         attention_type: "both", "self", or "cross"
-
+        train_mlp: Whether to also match MLP layers
+    
     Returns:
         Regex pattern string for LyCORIS target_name preset
     """
     # Build module name alternatives: q_proj|k_proj|v_proj|o_proj
     modules_pattern = "|".join(target_modules)
+    
+    # MLP pattern
+    mlp_pattern = ""
+    if train_mlp:
+        mlp_pattern = "|.*mlp\\.(gate_proj|up_proj|down_proj)"
 
     if attention_type == "self":
         # Only self-attention layers
-        return f".*self_attn.*({modules_pattern})$"
+        pattern = f".*self_attn.*({modules_pattern})$"
     elif attention_type == "cross":
         # Only cross-attention layers
-        return f".*cross_attn.*({modules_pattern})$"
+        pattern = f".*cross_attn.*({modules_pattern})$"
     else:
         # Both — match any attention layer with these projections
-        return f".*({modules_pattern})$"
+        pattern = f".*({modules_pattern})$"
+    
+    if train_mlp:
+        pattern = f"({pattern}){mlp_pattern}"
+    
+    return pattern
 
 
 def inject_lokr_into_dit(
     model,
     lokr_config,
     attention_type: str = "both",
+    train_mlp: bool = False,
 ) -> Tuple[Any, Any, Dict[str, Any]]:
     """Inject LoKr adapters into the DiT decoder of the model.
 
@@ -103,7 +115,16 @@ def inject_lokr_into_dit(
 
     # Build target module regex for LyCORIS
     target_modules = lokr_config.target_modules
-    target_regex = _build_target_regex(target_modules, attention_type)
+    
+    # Sync target_modules metadata if MLP training is requested
+    if train_mlp:
+        mlp_projs = ["gate_proj", "up_proj", "down_proj"]
+        for proj in mlp_projs:
+            if proj not in target_modules:
+                target_modules.append(proj)
+        logger.info(f"Expanded LoKr target_modules metadata to include MLP: {target_modules}")
+
+    target_regex = _build_target_regex(target_modules, attention_type, train_mlp=train_mlp)
 
     logger.info(f"LoKr target pattern: {target_regex}")
     logger.info(f"LoKr config: dim={lokr_config.linear_dim}, alpha={lokr_config.linear_alpha}, "

@@ -1151,7 +1151,7 @@ def start_training(
     auto_save_best_after_val,
     max_latent_len, torch_compile_flag,
     model_type_val, guidance_scale_val, cfg_dropout_val, num_inference_steps_val,
-    optimizer_type_val, scheduler_type_val, attention_type_val,
+    optimizer_type_val, scheduler_type_val, attention_type_val, train_mlp_val,
     gradient_checkpointing_flag, encoder_offloading_flag,
     timestep_mu_val, timestep_sigma_val,
     resume_enabled, resume_dir, resume_checkpoint,
@@ -1262,6 +1262,7 @@ def start_training(
             optimizer_type=str(optimizer_type_val) if optimizer_type_val else "adamw",
             scheduler_type=str(scheduler_type_val) if scheduler_type_val else "cosine",
             attention_type=str(attention_type_val) if attention_type_val else "both",
+            train_mlp=bool(train_mlp_val),
             gradient_checkpointing=bool(gradient_checkpointing_flag),
             encoder_offloading=bool(encoder_offloading_flag),
             # Sample inference during training
@@ -2330,6 +2331,7 @@ def create_ui():
                             label="Attention Target",
                             info="Which attention layers to train: self, cross, or both",
                         )
+                        train_mlp = gr.Checkbox(label="Train MLP", value=False, info="Also train MLP projection layers (gate, up, down). Higher quality but more VRAM.")
 
                     with gr.Row(elem_classes="compact-row"):
                         model_type_radio = gr.Radio(
@@ -2769,7 +2771,7 @@ def create_ui():
                 early_stop_enabled, early_stop_patience_val, auto_save_best_after,
                 max_latent_length, torch_compile_enabled,
                 model_type_radio, guidance_scale, cfg_dropout_prob, num_inference_steps,
-                optimizer_type, scheduler_type, attention_type,
+                optimizer_type, scheduler_type, attention_type, train_mlp,
                 gradient_checkpointing_enabled, encoder_offloading_enabled,
                 timestep_mu, timestep_sigma,
                 resume_enabled, resume_dir, resume_checkpoint_dropdown,
