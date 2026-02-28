@@ -1119,6 +1119,21 @@ def load_tensor_dataset(tensor_dir: str):
     return info, rec_epochs, rec_save
 
 
+def load_tensor_dataset_ui(tensor_dir: str, auto_recommend_epochs: bool):
+    """UI wrapper for load_tensor_dataset.
+
+    If auto_recommend_epochs is False, keep the user's current values for
+    Max Epochs and Save Every N Epochs.
+
+    Returns:
+        (info_text, max_epochs_update, save_every_update)
+    """
+    info, rec_epochs, rec_save = load_tensor_dataset(tensor_dir)
+    if auto_recommend_epochs:
+        return info, rec_epochs, rec_save
+    return info, gr.update(), gr.update()
+
+
 def _format_duration(seconds):
     seconds = int(seconds)
     if seconds < 60:
@@ -2247,7 +2262,13 @@ def create_ui():
                         )
                         tensor_dir_picker = gr.Button("📁", scale=0, min_width=45)
 
+
                     load_tensors_btn = gr.Button("📂 Load", variant="secondary", size="sm")
+                    auto_recommend_epochs = gr.Checkbox(
+                        label="Auto-recommend epochs",
+                        value=True,
+                        info="When loading tensors, auto-fill Max Epochs and Save Every N Epochs based on dataset size.",
+                    )
                     training_dataset_info = gr.Textbox(label="Dataset Info", interactive=False, lines=2)
 
                     gr.HTML('<div class="section-title" style="margin-top:15px">⚙️ Adapter Settings</div>')
@@ -2673,7 +2694,11 @@ def create_ui():
         demo.load(fn=format_vram_status, outputs=[vram_status])
 
         # Training
-        load_tensors_btn.click(fn=load_tensor_dataset, inputs=[training_tensor_dir], outputs=[training_dataset_info, max_epochs, save_every_n_epochs])
+        load_tensors_btn.click(
+            fn=load_tensor_dataset_ui,
+            inputs=[training_tensor_dir, auto_recommend_epochs],
+            outputs=[training_dataset_info, max_epochs, save_every_n_epochs],
+        )
         resume_dir_picker.click(fn=open_folder_picker, outputs=[resume_dir])
         resume_scan_btn.click(
             fn=scan_lora_checkpoints,
